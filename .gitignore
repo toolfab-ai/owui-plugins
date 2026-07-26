@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.ruff_cache/
+.pytest_cache/
+.venv/
+uv.lock
+
+*.local.*
+*.local/
+
+# Built plugin output
+plugins/*/plugin.py

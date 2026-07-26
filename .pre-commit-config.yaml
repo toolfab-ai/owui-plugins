@@ -1,0 +1,19 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+        stages: [pre-commit]
+      - id: ruff-format
+        stages: [pre-commit]
+
+  - repo: local
+    hooks:
+      - id: tests
+        name: run tests for changed plugins
+        entry: uv run python scripts/run_tests_for_changes.py
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
+        always_run: true

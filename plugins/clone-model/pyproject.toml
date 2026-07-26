@@ -1,0 +1,6 @@
+[project]
+name = "clone-model-plugin"
+version = "1.0.0"
+description = "Let users create editable copies of read-only workspace models"
+requires-python = ">=3.11"
+dependencies = []

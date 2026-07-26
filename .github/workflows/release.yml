@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '*/v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Parse tag
+        id: tag
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          PLUGIN="${TAG%/*}"
+          VERSION="${TAG#*/}"
+          VERSION="${VERSION#v}"
+          echo "plugin=$PLUGIN" >> $GITHUB_ENV
+          echo "version=$VERSION" >> $GITHUB_ENV
+          echo "tag=$TAG" >> $GITHUB_ENV
+
+      - name: Validate plugin exists
+        run: test -d "plugins/${{ env.plugin }}" || { echo "Plugin not found: ${{ env.plugin }}"; exit 1; }
+
+      - name: Build plugin
+        run: uv run python "plugins/${{ env.plugin }}/build.py" "${{ env.version }}"
+
+      - name: Generate release body
+        id: body
+        run: |
+          REPO="${{ github.repository }}"
+          TAG="${{ env.tag }}"
+          PLUGIN="${{ env.plugin }}"
+          VERSION="${{ env.version }}"
+          BODY=$(cat scripts/release_template.md \
+            | sed "s|{plugin}|$PLUGIN|g" \
+            | sed "s|{version}|$VERSION|g" \
+            | sed "s|{repo}|$REPO|g" \
+            | sed "s|{tag}|$TAG|g")
+          echo "body<<EOF" >> $GITHUB_OUTPUT
+          echo "$BODY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "${{ env.plugin }} v${{ env.version }}"
+          tag_name: ${{ github.ref_name }}
+          body: ${{ steps.body.outputs.body }}
+          files: plugins/${{ env.plugin }}/plugin.py
+          generate_release_notes: true
+
+      - name: Commit version bump to trunk
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add "plugins/${{ env.plugin }}/pyproject.toml"
+          git diff --cached --quiet || {
+            git commit -m "chore(${{ env.plugin }}): bump version to ${{ env.version }}"
+            git push origin HEAD:trunk
+          }
