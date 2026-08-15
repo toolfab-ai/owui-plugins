@@ -36,14 +36,19 @@ jobs:
           
           if [[ "$VERSION" == *"-"* ]]; then
             echo "is_prerelease=true" >> $GITHUB_ENV
-            echo "status_note=> [!CAUTION]\n> **PRE-RELEASE**: This version is for testing and preview purposes only. It is not recommended for production environments." >> $GITHUB_ENV
+            {
+              echo "status_note<<EOF"
+              echo "> [!CAUTION]"
+              echo "> **PRE-RELEASE**: This version is for testing and preview purposes only. It is not recommended for production environments."
+              echo "EOF"
+            } >> "$GITHUB_ENV"
           else
             echo "is_prerelease=false" >> $GITHUB_ENV
             echo "status_note=" >> $GITHUB_ENV
           fi
 
       - name: Validate plugin exists
-        run: test -d "plugins/${{ env.plugin }}" || { echo "Plugin not found: ${{ env.plugin }}"; exit 1; }
+        run: test -d "plugins/${{ env.plugin }}"
 
       - name: Build plugin
         run: uv run python "plugins/${{ env.plugin }}/build.py" "${{ env.version }}"
