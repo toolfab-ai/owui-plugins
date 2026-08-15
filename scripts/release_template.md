@@ -1,4 +1,5 @@
 ## {plugin} v{version}
+{status_note}
 
 ### Install via URL
 

@@ -33,6 +33,14 @@ jobs:
           echo "plugin=$PLUGIN" >> $GITHUB_ENV
           echo "version=$VERSION" >> $GITHUB_ENV
           echo "tag=$TAG" >> $GITHUB_ENV
+          
+          if [[ "$VERSION" == *"-"* ]]; then
+            echo "is_prerelease=true" >> $GITHUB_ENV
+            echo "status_note=> [!CAUTION]\n> **PRE-RELEASE**: This version is for testing and preview purposes only. It is not recommended for production environments." >> $GITHUB_ENV
+          else
+            echo "is_prerelease=false" >> $GITHUB_ENV
+            echo "status_note=" >> $GITHUB_ENV
+          fi
 
       - name: Validate plugin exists
         run: test -d "plugins/${{ env.plugin }}" || { echo "Plugin not found: ${{ env.plugin }}"; exit 1; }
@@ -42,35 +50,68 @@ jobs:
 
       - name: Generate release body
         id: body
+        shell: python
         run: |
-          REPO="${{ github.repository }}"
-          TAG="${{ env.tag }}"
-          PLUGIN="${{ env.plugin }}"
-          VERSION="${{ env.version }}"
-          BODY=$(cat scripts/release_template.md \
-            | sed "s|{plugin}|$PLUGIN|g" \
-            | sed "s|{version}|$VERSION|g" \
-            | sed "s|{repo}|$REPO|g" \
-            | sed "s|{tag}|$TAG|g")
-          echo "body<<EOF" >> $GITHUB_OUTPUT
-          echo "$BODY" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+            import os
+            import re
+            import sys
+            from pathlib import Path
+
+            plugin = os.environ["plugin"]
+            version = os.environ["version"]
+            
+            # 1. Extract Changelog
+            changelog_path = Path(f"plugins/{plugin}/CHANGELOG.md")
+            if not changelog_path.exists():
+                print(f"::error::Missing CHANGELOG.md for plugin {plugin}")
+                sys.exit(1)
+
+            changelog_content = changelog_path.read_text(encoding="utf-8")
+            
+            # Match ## [version] - date ... until next ## or EOF
+            # Supports both ## [1.0.0] and ## [1.0.0] - 2024-01-01
+            pattern = rf"## \[{re.escape(version)}\](?: - \d{{4}}-\d{{2}}-\d{{2}})?\n(.*?)(?=\n## \[|\Z)"
+            match = re.search(pattern, changelog_content, re.DOTALL)
+
+            if not match or not match.group(1).strip():
+                print(f"::error::Version {version} entry not found or empty in {plugin}/CHANGELOG.md")
+                sys.exit(1)
+
+            changelog_text = match.group(1).strip()
+
+            # 2. Prepare Template
+            template_path = Path("scripts/release_template.md")
+            if not template_path.exists():
+                print(f"::error::Missing scripts/release_template.md")
+                sys.exit(1)
+            
+            template = template_path.read_text(encoding="utf-8")
+            
+            values = {
+                "{plugin}": plugin,
+                "{version}": version,
+                "{repo}": os.environ["GITHUB_REPOSITORY"],
+                "{tag}": os.environ["tag"],
+                "{status_note}": os.environ.get("status_note", "").replace("\\n", "\n"),
+                "{changelog}": changelog_text
+            }
+            
+            body = template
+            for placeholder, value in values.items():
+                body = body.replace(placeholder, value)
+            
+            # 3. Set output
+            with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                f.write("body<<EOF\n")
+                f.write(body + "\n")
+                f.write("EOF\n")
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "${{ env.plugin }} v${{ env.version }}"
-          tag_name: ${{ github.ref_name }}
-          body: ${{ steps.body.outputs.body }}
-          files: plugins/${{ env.plugin }}/plugin.py
-          generate_release_notes: true
-
-      - name: Commit version bump to trunk
-        run: |
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-          git add "plugins/${{ env.plugin }}/pyproject.toml"
-          git diff --cached --quiet || {
-            git commit -m "chore(${{ env.plugin }}): bump version to ${{ env.version }}"
-            git push origin HEAD:trunk
-          }
+            name: "${{ env.plugin }} v${{ env.version }}"
+            tag_name: ${{ github.ref_name }}
+            body: ${{ steps.body.outputs.body }}
+            files: plugins/${{ env.plugin }}/plugin.py
+            generate_release_notes: false
+            prerelease: ${{ env.is_prerelease == 'true' }}

@@ -5,8 +5,22 @@ __pycache__/
 .venv/
 uv.lock
 
-*.local.*
-*.local/
+
 
 # Built plugin output
 plugins/*/plugin.py
+
+# Local-only
+.env
+*.local.*
+*.local/
+
+!*.example
+
+# AI configs
+.opencode
+.claude
+.codemie
+
+
+

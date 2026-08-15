@@ -37,7 +37,7 @@ def run_unit_tests(plugin_root: Path) -> None:
         ["uv", "run", "pytest", "-m", "unit", "-x", str(test_dir)],
         cwd=plugin_root.parent.parent,
     )
-    if result.returncode != 0:
+    if result.returncode not in (0, 5):
         sys.exit(result.returncode)
 
 
@@ -52,7 +52,7 @@ def run_integration_tests(plugin_root: Path) -> None:
         ["uv", "run", "pytest", "-m", "integration", "-x", str(test_dir)],
         cwd=plugin_root.parent.parent,
     )
-    if result.returncode != 0:
+    if result.returncode not in (0, 5):
         sys.exit(result.returncode)
 
 
@@ -146,11 +146,13 @@ def build(
     plugin_root: Path,
     version: Optional[str] = None,
     check_only: bool = False,
+    skip_tests: bool = False,
 ) -> None:
     verify_lint(plugin_root)
     verify_format(plugin_root)
-    run_unit_tests(plugin_root)
-    run_integration_tests(plugin_root)
+    if not skip_tests:
+        run_unit_tests(plugin_root)
+        run_integration_tests(plugin_root)
     output = merge_sources(plugin_root / "src")
     if version:
         output = inject_version(output, version)

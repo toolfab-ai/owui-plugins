@@ -19,6 +19,8 @@ dev = [
     "pydantic>=2",
     "beautifulsoup4>=4",
     "pre-commit>=4.6.1",
+    "pymupdf>=1.28.0",
+    "python-dotenv>=1.2.2",
 ]
 
 [project.optional-dependencies]
