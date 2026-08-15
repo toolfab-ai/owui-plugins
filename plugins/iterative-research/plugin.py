@@ -2,7 +2,7 @@
 title: Iterative Deep Research Agent
 author: toolfab-ai
 author_url: https://github.com/toolfab-ai/
-version: 0.9.1
+version: 0.9.2
 description: Autonomous multi-turn web search & scraping loops to synthesize detailed cited research-reports.
 license: MIT
 github: https://github.com/toolfab-ai/owui-plugins
@@ -10,9 +10,7 @@ github: https://github.com/toolfab-ai/owui-plugins
 
 from __future__ import annotations
 
-
-class Pipe:
-    pass
+class Pipe: pass
 
 
 from datetime import datetime
@@ -54,6 +52,8 @@ class CitationsMixin:
 import json
 import logging
 import re
+from datetime import datetime
+from typing import Any
 
 try:
     from fastapi import Request
@@ -177,7 +177,8 @@ class LLMMixin:
 
 import asyncio
 import logging
-from typing import AsyncGenerator, Optional
+import re
+from typing import Any, AsyncGenerator, Awaitable, Callable, Optional
 
 try:
     from fastapi import Request
@@ -489,9 +490,12 @@ class ResearchMixin:
             yield chunk
 
 
+
+import asyncio
 import ipaddress
 import logging
 import socket
+from typing import Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -629,6 +633,9 @@ class ScraperMixin:
 
 
 import logging
+from typing import Any, Optional
+
+import httpx
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -708,6 +715,8 @@ class SearchMixin:
 
         return []
 
+
+from typing import Any, AsyncGenerator, Awaitable, Callable, Optional
 
 try:
     from fastapi import Request
@@ -792,9 +801,17 @@ class SynthesisMixin:
             )
 
 
-# --- Shared: update_notifier.notifier ---
+
 import logging
+
+# --- Shared: update_notifier.notifier ---
+
+import logging
+import re
 import time
+from typing import Any, Optional
+
+import httpx
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -1013,7 +1030,6 @@ class UpdateMixin:
 
         return None
 
-
 # --- End Shared ---
 
 # ---------------------------------------------------------------------------
@@ -1101,7 +1117,7 @@ class UserValves(BaseModel):
 
 
 import logging
-from typing import Union
+from typing import Any, AsyncGenerator, Awaitable, Callable, Optional, Union
 
 try:
     from fastapi import Request
@@ -1111,6 +1127,7 @@ except ImportError:
         """Fallback for environments without fastapi (such as local testing)."""
 
         pass
+
 
 
 # ---------------------------------------------------------------------------
