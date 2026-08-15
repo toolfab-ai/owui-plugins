@@ -91,7 +91,7 @@ class TestUpdateMixin:
 
     def test_get_current_version(self) -> None:
         # Should match the version from the module docstring
-        assert self.pipe._get_current_version() == "0.9.0"
+        assert self.pipe._get_current_version() == "0.9.1"
 
     def test_parse_version(self) -> None:
         # Standard stable major.minor.patch:

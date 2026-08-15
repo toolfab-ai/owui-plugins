@@ -1,6 +1,6 @@
 [project]
 name = "iterative-research-pipe"
-version = "0.9.0"
+version = "0.9.1"
 description = "Iterative Deep Research Pipe for Open WebUI"
 requires-python = ">=3.11"
 dependencies = [
