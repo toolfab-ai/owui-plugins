@@ -74,18 +74,26 @@ import pytest
 from pathlib import Path
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
-PLUGIN_SOURCE = (PLUGIN_DIR / "plugin.py").read_text("utf-8")
 FUNCTION_ID = "my_plugin_id"
+
+@pytest.fixture
+def plugin_source() -> str:
+    """Load the plugin source. Lazy loaded to prevent collection errors in CI."""
+    path = PLUGIN_DIR / "plugin.py"
+    if not path.exists():
+        # Fallback to main source if built artifact is missing
+        path = PLUGIN_DIR / "src" / "main.py"
+    return path.read_text("utf-8")
 
 @pytest.mark.integration
 class TestMyPlugin:
-    async def test_upload(self, owui_client) -> None:
+    async def test_upload(self, owui_client, plugin_source) -> None:
         """Verify the plugin can be successfully uploaded."""
         # owui_client is a global fixture that handles auth automatically
         resp = await owui_client.create_function(
             function_id=FUNCTION_ID,
             name="My Plugin",
-            content=PLUGIN_SOURCE,
+            content=plugin_source,
         )
         assert resp["id"] == FUNCTION_ID
 

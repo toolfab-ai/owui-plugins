@@ -52,6 +52,13 @@ jobs:
           enable-cache: true
       - name: Install dependencies
         run: uv sync --dev
+      - name: Build plugins for testing
+        run: |
+          for plugin in plugins/*/build.py; do
+            dir=$(dirname "$plugin")
+            echo "Building $dir for testing..."
+            uv run python "$plugin" --skip-tests
+          done
       - name: Run unit tests
         run: uv run pytest -m unit -x
 

@@ -3,14 +3,22 @@ from pathlib import Path
 import pytest
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
-PLUGIN_SOURCE = (PLUGIN_DIR / "plugin.py").read_text("utf-8")
 FUNCTION_ID = "iterative_research"
 FUNCTION_NAME = "Iterative Deep Research Agent"
 
 
+@pytest.fixture
+def plugin_source() -> str:
+    """Load the compiled plugin source. Lazy loaded to prevent pytest collection errors."""
+    path = PLUGIN_DIR / "plugin.py"
+    if not path.exists():
+        pytest.skip(f"plugin.py not found at {path}. Run build script first.")
+    return path.read_text("utf-8")
+
+
 @pytest.mark.integration
 class TestIterativeResearchPipe:
-    async def test_upload_pipe(self, owui_client) -> None:
+    async def test_upload_pipe(self, owui_client, plugin_source) -> None:
         """Verify the compiled Pipe plugin can be successfully uploaded as an Open WebUI function."""
         # Clean up any stale function registrations to ensure robustness across repeated local runs
         try:
@@ -21,7 +29,7 @@ class TestIterativeResearchPipe:
         pipe = await owui_client.create_function(
             function_id=FUNCTION_ID,
             name=FUNCTION_NAME,
-            content=PLUGIN_SOURCE,
+            content=plugin_source,
             description="Autonomous multi-step search, parallel scrape, and cited synthesis agent",
         )
         assert pipe["id"] == FUNCTION_ID
