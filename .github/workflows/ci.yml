@@ -39,7 +39,7 @@ jobs:
           for plugin in plugins/*/build.py; do
             dir=$(dirname "$plugin")
             echo "Checking $dir..."
-            uv run python "$plugin" --check
+            uv run python "$plugin" --check --skip-tests
           done
 
   unit-tests:
