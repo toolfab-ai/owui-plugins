@@ -70,6 +70,17 @@ def merge_sources(src_dir: Path) -> str:
 
     parts.append("from __future__ import annotations")
 
+    # Detect primary class name from main.py for Community platform compatibility
+    main_file = src_dir / "main.py"
+    if main_file.exists():
+        main_content = main_file.read_text(encoding="utf-8")
+        for class_name in ["Pipe", "Filter", "Action", "Tools", "Event"]:
+            if re.search(rf"^class\s+{class_name}[\(:]", main_content, re.MULTILINE):
+                # Inject a forward declaration immediately so the community site's
+                # simple parser finds the class name first.
+                parts.append(f"class {class_name}: pass")
+                break
+
     internal_files = sorted(src_dir.glob("_*.py"))
     for f in internal_files:
         content = f.read_text(encoding="utf-8")
