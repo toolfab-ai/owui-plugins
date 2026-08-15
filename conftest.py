@@ -38,7 +38,7 @@ def owui_url() -> str:
                 r = httpx.get(f"{url}/api/auth", timeout=5.0)
                 if r.status_code == 200:
                     break
-            except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException):
+            except httpx.HTTPError:
                 pass
             time.sleep(2)
         else:
