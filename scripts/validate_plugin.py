@@ -137,29 +137,37 @@ def main():
         if not plugin_dir.is_dir():
             continue
 
+        # Ignore .local plugins
+        if plugin_dir.name.endswith(".local"):
+            print(f"SKIP  {plugin_dir.name} (local plugin)")
+            continue
+
+        errors: list[str] = []
+
+        # Check for mandatory files
+        if not (plugin_dir / "README.md").is_file():
+            errors.append("Missing README.md")
+        if not (plugin_dir / "CHANGELOG.md").is_file():
+            errors.append("Missing CHANGELOG.md")
+
         flat_files = _plugin_sources(plugin_dir)
         if flat_files:
             for py_file in flat_files:
-                errors = validate_plugin(py_file)
-                if errors:
-                    exit_code = 1
-                    print(f"FAIL  {py_file.relative_to(PLUGINS_DIR.parent)}")
-                    for err in errors:
-                        print(f"       - {err}")
-                else:
-                    print(f"OK    {py_file.relative_to(PLUGINS_DIR.parent)}")
+                plugin_errors = validate_plugin(py_file)
+                if plugin_errors:
+                    errors.extend([f"{py_file.name}: {e}" for e in plugin_errors])
         else:
-            errors = _validate_src_layout(plugin_dir)
-            if errors:
-                exit_code = 1
-                for err in errors:
-                    print(
-                        f"FAIL  {plugin_dir.name}/src/{err.split(':', 1)[0].split('/')[-1] if '/' in err else err}"
-                    )
-                    if ": " in err:
-                        print(f"       - {err.split(': ', 1)[1]}")
-            else:
-                print(f"OK    {plugin_dir.name}/src/")
+            layout_errors = _validate_src_layout(plugin_dir)
+            if layout_errors:
+                errors.extend(layout_errors)
+
+        if errors:
+            exit_code = 1
+            print(f"FAIL  {plugin_dir.name}")
+            for err in errors:
+                print(f"       - {err}")
+        else:
+            print(f"OK    {plugin_dir.name}")
 
     sys.exit(exit_code)
 

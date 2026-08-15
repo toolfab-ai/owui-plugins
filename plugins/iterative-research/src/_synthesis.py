@@ -49,7 +49,9 @@ class SynthesisMixin:
                 f"Content:\n{info['content']}\n\n"
             )
 
+        dt_context = self._get_datetime_context()
         system_prompt = (
+            f"{dt_context}"
             "You are an expert research synthesizer. Your goal is to write a comprehensive, "
             "authoritative, highly structured, and professionally formatted research report "
             "based on the provided scraped sources.\n"

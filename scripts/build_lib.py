@@ -58,31 +58,74 @@ def run_integration_tests(plugin_root: Path) -> None:
 
 def merge_sources(src_dir: Path) -> str:
     parts = []
+    seen_shared = set()
+    repo_root = src_dir.parent.parent.parent
+
     meta_file = src_dir / "meta.py"
     if meta_file.exists():
         tree = ast.parse(meta_file.read_text(encoding="utf-8"))
         docstring = ast.get_docstring(tree)
         if docstring:
             parts.append(f'"""\n{docstring}\n"""')
+
+    parts.append("from __future__ import annotations")
+
     internal_files = sorted(src_dir.glob("_*.py"))
     for f in internal_files:
         content = f.read_text(encoding="utf-8")
+        content = _strip_docstring(content)
+        content = _resolve_shared_imports(content, repo_root, seen_shared)
         content = _strip_internal_imports(content)
         parts.append(content)
+
     main_file = src_dir / "main.py"
     if main_file.exists():
         content = main_file.read_text(encoding="utf-8")
         content = _strip_docstring(content)
+        content = _resolve_shared_imports(content, repo_root, seen_shared)
         content = _strip_internal_imports(content)
         parts.append(content)
     return "\n\n".join(parts)
+
+
+def _resolve_shared_imports(content: str, repo_root: Path, seen_shared: set[str]) -> str:
+    lines = []
+    for line in content.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("from shared."):
+            # e.g., from shared.update_notifier.notifier import UpdateMixin
+            match = re.match(r"from shared\.([\w\.]+)\s+import\s+.*", stripped)
+            if match:
+                module_name = match.group(1)
+                if module_name in seen_shared:
+                    continue
+
+                module_path = module_name.replace(".", "/") + ".py"
+                full_path = repo_root / "shared" / module_path
+                if full_path.exists():
+                    shared_content = full_path.read_text(encoding="utf-8")
+                    shared_content = _strip_docstring(shared_content)
+                    shared_content = _strip_internal_imports(shared_content)
+                    # Recursively resolve if the shared module itself imports other shared modules
+                    shared_content = _resolve_shared_imports(shared_content, repo_root, seen_shared)
+                    lines.append(f"# --- Shared: {module_name} ---")
+                    lines.append(shared_content)
+                    lines.append("# --- End Shared ---")
+                    seen_shared.add(module_name)
+                    continue
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _strip_internal_imports(content: str) -> str:
     lines = []
     for line in content.split("\n"):
         stripped = line.strip()
-        if stripped.startswith("from .") or stripped.startswith("import ."):
+        if (
+            stripped.startswith("from .")
+            or stripped.startswith("import .")
+            or stripped.startswith("from __future__")
+        ):
             continue
         lines.append(line)
     return "\n".join(lines)

@@ -1,45 +1,93 @@
 ## Quick start
 
-1. Configure either **Tavily API Key** or **SearXNG URL** in the plugin's Valves settings.
-2. Select the **Iterative Deep Research Agent** model from your Open WebUI chat dropdown.
-3. Submit a complex research prompt (e.g., "Analyze the differences between Rust and Go for building high-throughput microservices in 2026, focusing on memory overhead and developer velocity").
-4. Watch the step-by-step thinking block as the agent plans searches, scrapes pages, and compiles the final report with references!
+To start using the **Iterative Deep Research** plugin in your Open WebUI workspace, follow these simple steps:
+
+1. **Enable and Configure Web Search**: Go to Open WebUI **Admin Settings** -> **Functions** -> **Iterative Research** -> **Valves**.
+   - Input your self-hosted **SearXNG URL** (e.g., `http://localhost:8080` or `http://searxng:8080`) or provide a **Tavily API Key** (https://tavily.com).
+2. **Select the Model**: In your chat model dropdown, select the newly registered **Iterative Research** or **Deep Research Agent** model.
+3. **Submit a Deep Research Prompt**: Enter a complex, multi-layered query that requires deep investigation. For example:
+   > *"Compare recent financial earnings of Apple and Microsoft for the latest quarter in 2026, analyzing key revenue drivers and operating margins."*
+4. **Monitor Live Iterative Reasoning**: Watch the real-time collapsible `<thinking>` blocks stream into the interface using the `event_emitter` protocol. You will see the planning queries, specific web links currently being crawled in parallel, and intermediate gap analyses.
+5. **Human-in-the-Loop Steering (Optional)**: If `CO_STORM_STEERING` is enabled in your Valves, look for the interactive pause prompt after the first iteration. Provide steering instructions to pivot the agent’s research direction before it resumes.
+
+---
 
 ## Description
 
-The **Iterative Deep Research Agent** is an autonomous multi-turn web search & scraping pipe plugin for Open WebUI. It executes multi-step research loops to discover, crawl, and synthesize detailed reports complete with in-text citations.
+The **Iterative Deep Research Agent** is a next-generation autonomous web search, scraping, and synthesis `Pipe` plugin designed for the Open WebUI platform. It transforms standard chat completions into a powerful, multi-step deep research process, elevating Open WebUI from a simple chat interface into a fully extensible **Agentic Workspace** (fully compliant with OWUI v0.11.0+ and Model Context Protocol standards).
 
-Key features include:
-- **Autonomous Planning & Gap Analysis**: Formulates search plans, executes searches, identifies gaps, and iterates dynamically.
-- **Parallel Web Scraping**: Safely downloads page contents in parallel with built-in SSRF protection, parses clean text, and digests it.
-- **Human-in-the-Loop Steering (Co-STORM style)**: Optionally pauses after the first iteration to receive interactive steering feedback from the user.
-- **Automatic Cite Generation**: Emits proper Open WebUI citation events to link seamlessly to scraped sources.
-- **Background Update Notifications**: Queries GitHub API in the background to alert administrators when new releases are available.
+Unlike standard tools, this plugin acts as a custom model endpoint that orchestrates a sophisticated search-reason-act loop using native backend completions, keeping the integration **completely paste-and-play with zero external scraping dependencies**.
+
+### Key Features
+- **Autonomous Multi-Turn Gap Analysis**: The agent doesn't just search once. It plans searches, executes queries, digests full web page contents, evaluates gathered context, identifies remaining informational gaps, and performs follow-up searches dynamically.
+- **High-Fidelity Transparency via `event_emitter`**: Eliminates the typical "black box" search experience. It streams real-time collapsible `<thinking>` blocks containing current search plans, links being scraped, and intermediate reasoning.
+- **Zero-External-Dependency Parallel Scraping**: Features a robust, async web scraper using standard libraries (`httpx` and `beautifulsoup4`) that fetches multiple pages concurrently (via `asyncio.gather`). It avoids expensive paid crawl/reader APIs.
+- **SSRF and Rate-Limit Protection**: Implements strict security validations to prevent Server-Side Request Forgery (SSRF) against private subnets and enforces a rigid `5.0-second` scrape timeout to ensure maximum performance.
+- **Human-in-the-Loop Co-STORM Steering**: Offers optional interactive steering. When enabled, the research loop pauses after the first step to prompt the user for direction, adjusting its investigative focus dynamically.
+- **Clean Chat History & Database Integration**: Keeps database history clean by hiding messy crawling steps, raw snippets, and logs from the persistent chat history. Only the beautifully synthesized Markdown report with fully linked in-text citations is saved.
+- **Automated Update Notifications**: Periodically checks the upstream GitHub repository in the background to alert system administrators when a new version or release becomes available.
+
+---
 
 ## Problem Statement
 
-Standard LLM interfaces rely on static knowledge and single-shot web searches. Even with search integration, they typically perform a single query, download a handful of pages, and summarize them in one go. This single-turn process lacks:
-1. The ability to identify information gaps after reading search results.
-2. The feedback loop to run follow-up searches for missing details.
-3. Robust SSRF protection for safe and parallelized internal web scraping.
-4. Interactive human steering during long-running research loops.
+As Open WebUI enters the "Platform Era" of agentic workspaces, the limitations of built-in search tools have become highly visible:
+1. **The "Black Box" Search Problem**: Standard web search integrations operate on a single-shot mechanism. The user asks a question, the system runs one query, reads a few short snippets, and attempts a summary. There is no iterative reasoning, leaving users with superficial or inaccurate answers on complex subjects.
+2. **The Information Gap**: Short snippets returned by search search APIs are rarely sufficient for professional research. Critical nuances, tables, and timelines are buried in full-text pages that standard tools fail to crawl.
+3. **Lack of Transparency**: Users are kept in the dark about *how* search terms were derived, *what* sources were crawled, and *why* specific analytical conclusions were reached. This lack of intermediate thinking visibility breeds trust issues.
+4. **Database Pollution & Bloat**: Typical multi-turn agent scripts dump raw links, JSON arrays, and scrape scrapings directly into the chat log database. This causes significant bloat and pollutes the persistent context.
+5. **Security and SSRF Vulnerabilities**: Naive python-based scrapers run the risk of scanning internal corporate networks (private IP addresses), introducing severe security gaps if exposed to adversarial user prompts.
 
-This results in superficial summaries and missing nuances for multi-faceted topics.
+The **Iterative Deep Research Agent** solves these limitations by providing a transparent, self-correcting, secure, and deeply rigorous research loop native to the Open WebUI experience.
 
-## Valves (Configuration)
+---
 
-- **ENABLE_UPDATE_NOTIFICATIONS** (bool, default: `True`): If enabled, the plugin will check GitHub in the background for new releases and notify the admin.
-- **CHECK_PREVIEW_RELEASES** (bool, default: `False`): If enabled, checks for preview/dev/pre-release versions on GitHub as well.
-- **SEARXNG_URL** (str, default: `""`): The base URL of your SearXNG instance (e.g., `http://searxng:8080`). Used as a search engine for discovering new information.
-- **TAVILY_API_KEY** (str, default: `""`): API key for Tavily Search (https://tavily.com). If provided, Tavily will be used as the primary or fallback search engine.
-- **MODEL** (str, default: `""`): The internal LLM model ID to use for research planning, gap analysis, and final synthesis. If left empty, the plugin will attempt to auto-detect an available model from the workspace.
-- **MAX_STEPS** (int, default: `3`, min: `1`, max: `10`): Maximum number of iterative search-and-scraping loops to perform. Higher values lead to deeper research but take more time.
-- **MAX_PAGES_TO_SCRAPE** (int, default: `3`, min: `1`, max: `10`): Maximum number of new web pages to scrape and analyze in each research step.
-- **CO_STORM_STEERING** (bool, default: `False`): If enabled, the agent will pause after the first research step to allow the user to provide interactive steering feedback (Co-STORM style).
+## Requirements
+
+This plugin requires one of the following search providers to be configured:
+
+- **SearXNG**: A self-hosted SearXNG instance URL (e.g., `http://localhost:8080`).
+- **Tavily AI**: A valid Tavily API key (get one at [tavily.com](https://tavily.com)).
+
+---
+
+## Admin Valves (global configuration)
+
+The plugin can be fully configured by administrators through the Open WebUI Admin interface using the following Valves:
+
+| Valve Name | Type | Default | Description |
+|------------|------|---------|-------------|
+| **ENABLE_UPDATE_NOTIFICATIONS** | `bool` | `True` | Checks GitHub in the background and notifies admins of new releases. |
+| **CHECK_PREVIEW_RELEASES** | `bool` | `False` | Also checks for pre-release, dev, and preview tags on GitHub. |
+| **SEARXNG_URL** | `str` | `""` | The base URL of your SearXNG instance (e.g., `http://searxng:8080`) for private, self-hosted web search. |
+| **TAVILY_API_KEY** | `str` | `""` | API key for Tavily Search (alternative or primary search engine API). |
+| **MODEL** | `str` | `""` | The internal LLM model ID used for planning, reasoning, and synthesis. (Left blank to auto-detect from active models). |
+| **MAX_STEPS** | `int` | `3` | Maximum number of search-reasoning loops to perform (range: `1` to `10`). |
+| **MAX_PAGES_TO_SCRAPE** | `int` | `3` | Maximum number of new web pages to crawl and digest concurrently per iteration (range: `1` to `10`). |
+| **CO_STORM_STEERING** | `bool` | `False` | Pauses the research loop after Step 1 to allow interactive user feedback (Co-STORM style). |
+
+---
+
+## User Valves (per-user overrides)
+
+Users can customize the agent's behavior for their own chats without affecting global settings. All fields default to `"default"`, which means they **inherit the value from the Admin Valves**.
+
+| Valve Name | Type | Default | Description |
+|------------|------|---------|-------------|
+| **max_steps** | `str` | `"default"` | Max research steps (e.g., `5`). Variants: `1-10`. |
+| **max_pages_to_scrape** | `str` | `"default"` | Max pages to scrape per iteration (e.g., `5`). Variants: `1-10`. |
+| **co_storm_steering** | `str` | `"default"` | Enable Co-STORM steering pause (e.g., `true`). Variants: `true`, `false`. |
+
+---
 
 ## Installation
 
-- **Via GitHub (recommended)**:
-  Copy the contents of `plugin.py` or import it directly inside Open WebUI Admin Settings -> Functions.
-- **Via Community**:
-  Download and install the plugin from the Open WebUI Community directory once published.
+### Via URL (Recommended)
+1. Navigate to the [Releases](https://github.com/open-webui/owui-plugins/releases) page.
+2. Copy the URL of the `plugin.py` file from the latest release of this plugin.
+3. In Open WebUI, navigate to **Admin Settings** -> **Functions** (or **Tools**) -> **+ New Function** -> **Install from URL**.
+4. Paste the URL and click **Install**.
+
+### Via Open WebUI Community
+1. Search for **Iterative Deep Research Agent** on the [Open WebUI Community](https://openwebui.com).
+2. Click **Install** to import it directly into your instance.

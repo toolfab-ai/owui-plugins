@@ -28,12 +28,20 @@ class ResearchMixin:
         __user__: Optional[dict[str, Any]] = None,
         __request__: Optional[Request] = None,
         __event_emitter__: Optional[Callable[[dict[str, Any]], Awaitable[None]]] = None,
+        __user_valves__: Optional[Any] = None,
     ) -> AsyncGenerator[str, None]:
         """Internal generator for executing the deep research and streaming chunk tokens."""
         messages = body.get("messages", [])
         if not messages:
             yield "No messages provided."
             return
+
+        # Resolve configuration
+        max_steps = self._get_config("max_steps", __user_valves__)
+        max_pages = self._get_config("max_pages_to_scrape", __user_valves__)
+        co_storm = self._get_config("co_storm_steering", __user_valves__)
+        tavily_key = self.valves.TAVILY_API_KEY
+        searxng_url = self.valves.SEARXNG_URL
 
         # Find original query (first user message)
         original_query = ""
@@ -50,7 +58,7 @@ class ResearchMixin:
                 break
 
         # Check if this is a continuation of interactive steering
-        is_continuation = len(messages) > 1 and self.valves.CO_STORM_STEERING
+        is_continuation = len(messages) > 1 and co_storm
         steering_feedback = latest_user_message if is_continuation else ""
 
         # Load user context safely
@@ -70,7 +78,7 @@ class ResearchMixin:
                     logger.warning("Could not load user object: %s", e)
 
         # Warn if no search engine configured
-        if not self.valves.TAVILY_API_KEY and not self.valves.SEARXNG_URL:
+        if not tavily_key and not searxng_url:
             if __event_emitter__:
                 await __event_emitter__(
                     {
@@ -88,6 +96,11 @@ class ResearchMixin:
         backend_model = await self._get_backend_model(body)
         scraped_sources: dict[str, dict[str, str]] = {}
 
+        # Check for updates and show notification at the very top of the response
+        update_msg = await self._get_update_notification(__user__)
+        if update_msg:
+            yield f"{update_msg}\n\n"
+
         start_step = 1
         if is_continuation:
             # Reconstruct scraped sources from history to avoid repeating scrapes
@@ -102,8 +115,6 @@ class ResearchMixin:
                             "content": f"Already cited in previous turn: {title}",
                         }
             start_step = 2
-
-        max_steps = self.valves.MAX_STEPS
 
         # Multi-turn search and scrape loop
         for step in range(start_step, max_steps + 1):
@@ -129,7 +140,9 @@ class ResearchMixin:
             else:
                 scraped_summary = "None (No pages scraped yet)."
 
+            dt_context = self._get_datetime_context()
             system_prompt = (
+                f"{dt_context}"
                 "You are an expert autonomous deep research planning agent.\n"
                 "Your goal is to formulate a search strategy to answer the user's query.\n"
                 "You identify what is already known and specify 'information gaps' that still need researching.\n"
@@ -201,7 +214,7 @@ class ResearchMixin:
 
                 for q in queries:
                     yield f"Searching: `{q}`...\n"
-                    search_res = await self._search_query(q)
+                    search_res = await self._search_query(q, __user_valves__)
                     yield f"  Found {len(search_res)} results.\n"
                     all_search_results.extend(search_res)
 
@@ -210,13 +223,13 @@ class ResearchMixin:
             for res in all_search_results:
                 url = res.get("url")
                 if url and url not in scraped_sources and url not in unique_results:
-                    if self._is_safe_url(url):
+                    if await self._is_safe_url(url):
                         unique_results[url] = res
                     else:
                         yield f"  SSRF check skipped unsafe URL: {url}\n"
 
             # Perform parallel page scraping
-            urls_to_scrape = list(unique_results.keys())[: self.valves.MAX_PAGES_TO_SCRAPE]
+            urls_to_scrape = list(unique_results.keys())[:max_pages]
             if urls_to_scrape:
                 if __event_emitter__:
                     await __event_emitter__(
@@ -256,7 +269,7 @@ class ResearchMixin:
             yield "</thinking>\n\n"
 
             # Co-STORM Steering Pause
-            if self.valves.CO_STORM_STEERING and step < max_steps:
+            if co_storm and step < max_steps:
                 if __event_emitter__:
                     await __event_emitter__(
                         {
