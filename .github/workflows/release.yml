@@ -66,6 +66,8 @@ jobs:
             plugin = os.environ["plugin"]
             version = os.environ["version"]
             
+            print(f"--- Processing {plugin} v{version} ---")
+            
             # 1. Extract Changelog
             changelog_path = Path(f"plugins/{plugin}/CHANGELOG.md")
             if not changelog_path.exists():
@@ -74,16 +76,32 @@ jobs:
 
             changelog_content = changelog_path.read_text(encoding="utf-8")
             
-            # Match ## [version] - date ... until next ## or EOF
-            # Supports both ## [1.0.0] and ## [1.0.0] - 2024-01-01
-            pattern = rf"## \[{re.escape(version)}\](?: - \d{{4}}-\d{{2}}-\d{{2}})?\n(.*?)(?=\n## \[|\Z)"
-            match = re.search(pattern, changelog_content, re.DOTALL)
-
-            if not match or not match.group(1).strip():
-                print(f"::error::Version {version} entry not found or empty in {plugin}/CHANGELOG.md")
+            # Line-by-line extraction for robustness
+            header_pattern = rf"^## \[{re.escape(version)}\](?: - \d{{4}}-\d{{2}}-\d{{2}})?\s*$"
+            lines = changelog_content.splitlines()
+            start_idx = -1
+            for i, line in enumerate(lines):
+                if re.match(header_pattern, line):
+                    start_idx = i + 1
+                    break
+            
+            if start_idx == -1:
+                print(f"::error::Version {version} header not found in CHANGELOG.md")
+                # Print available headers for debugging
+                print("Available headers:")
+                for line in lines:
+                    if line.startswith("## ["):
+                        print(f"  {line}")
                 sys.exit(1)
-
-            changelog_text = match.group(1).strip()
+            
+            content_lines = []
+            for i in range(start_idx, len(lines)):
+                if lines[i].startswith("## ["):
+                    break
+                content_lines.append(lines[i])
+            
+            changelog_text = "\n".join(content_lines).strip()
+            print(f"Extracted changelog ({len(changelog_text)} chars)")
 
             # 2. Calculate Checksum
             plugin_file = Path(f"plugins/{plugin}/plugin.py")
@@ -110,7 +128,7 @@ jobs:
                 "{version}": version,
                 "{repo}": os.environ["GITHUB_REPOSITORY"],
                 "{tag}": os.environ["tag"],
-                "{status_note}": os.environ.get("status_note", "").replace("\\n", "\n"),
+                "{status_note}": os.environ.get("status_note", ""),
                 "{changelog}": changelog_text,
                 "{checksum}": checksum
             }
@@ -124,6 +142,8 @@ jobs:
                 f.write("body<<EOF\n")
                 f.write(body + "\n")
                 f.write("EOF\n")
+            
+            print("Successfully generated release body")
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
