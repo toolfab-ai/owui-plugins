@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-"""Build script for clone-model plugin."""
-
 import sys
 from pathlib import Path
 
@@ -13,9 +11,12 @@ if __name__ == "__main__":
     root = Path(__file__).parent
     version = None
     check_only = False
+    skip_tests = False
     for arg in sys.argv[1:]:
         if arg == "--check":
             check_only = True
+        elif arg == "--skip-tests":
+            skip_tests = True
         elif arg.startswith("--version="):
             version = arg.split("=", 1)[1]
         elif arg.startswith("--"):
@@ -23,4 +24,4 @@ if __name__ == "__main__":
             sys.exit(1)
         else:
             version = arg
-    build(root, version=version, check_only=check_only)
+    build(root, version=version, check_only=check_only, skip_tests=skip_tests)
