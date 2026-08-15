@@ -65,6 +65,13 @@ jobs:
           enable-cache: true
       - name: Install dependencies
         run: uv sync --dev
+      - name: Build plugins
+        run: |
+          for plugin in plugins/*/build.py; do
+            dir=$(dirname "$plugin")
+            echo "Building $dir for testing..."
+            uv run python "$plugin" --skip-tests
+          done
       - name: Pre-pull Open WebUI image
         run: docker pull ghcr.io/open-webui/open-webui:main
       - name: Run integration tests
