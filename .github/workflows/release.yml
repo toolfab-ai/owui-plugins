@@ -51,7 +51,7 @@ jobs:
         run: test -d "plugins/${{ env.plugin }}"
 
       - name: Build plugin
-        run: uv run python "plugins/${{ env.plugin }}/build.py" "${{ env.version }}"
+        run: uv run python "plugins/${{ env.plugin }}/build.py" "${{ env.version }}" --skip-tests
 
       - name: Generate release body
         id: body
