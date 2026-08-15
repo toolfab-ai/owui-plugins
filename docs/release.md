@@ -37,15 +37,18 @@ Once the tag is pushed, the `.github/workflows/release.yml` workflow performs th
     - Executes the unit and integration test suites.
     - Merges modular source files from `src/` into the final `plugin.py`.
     - Updates the version in `pyproject.toml` and the module docstring.
-4.  **GitHub Release Creation**: Creates a formal GitHub Release and attaches the compiled `plugin.py`.
-5.  **Version Synchronization**: Commits the version bump in `pyproject.toml` back to the `trunk` branch to keep the source of truth in sync.
+4.  **GitHub Release Creation**: Creates a formal GitHub Release and attaches the compiled `plugin.py`. The `plugin.py` artifact is generated on-the-fly and is not tracked in the repository source to prevent synchronization drift.
 
 ## Maintainer Responsibility
 
 > [!IMPORTANT]
 > **Only project maintainers are eligible to release plugins.**
 
-Contributors should submit Pull Requests. Once merged, a maintainer will review the state of the `trunk` branch and trigger the release using the tagging method described above.
+The release process follows a **Pull Request First** model:
+
+1.  **Release Prep**: A maintainer (or the Release Manager agent) creates a release branch (e.g., `release/plugin-v1.2.3`), updates the version in `pyproject.toml` and `src/meta.py`, and prepares the `CHANGELOG.md`.
+2.  **Pull Request**: The release branch is submitted as a PR to `trunk`. This ensures all CI checks (linting, unit tests, integration tests) pass.
+3.  **Merge**: Once the PR is approved and merged, the maintainer triggers the official release by pushing the tag to the `trunk` branch.
 
 ### Pre-release Verification
 Before pushing a stable tag, maintainers are encouraged to:
