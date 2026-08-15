@@ -46,3 +46,20 @@ class Valves(BaseModel):
         description="If enabled, the agent will pause after the first research step to "
         "allow the user to provide interactive steering feedback (Co-STORM style).",
     )
+
+
+class UserValves(BaseModel):
+    """Per-user settings for the Iterative Research Pipe."""
+
+    max_steps: str = Field(
+        default="default",
+        description="Maximum iterative search steps (e.g., 5). Variants: 1-10. Use 'default' to inherit admin setting.",
+    )
+    max_pages_to_scrape: str = Field(
+        default="default",
+        description="Max pages to scrape per iteration (e.g., 5). Variants: 1-10. Use 'default' to inherit admin setting.",
+    )
+    co_storm_steering: str = Field(
+        default="default",
+        description="Enable Co-STORM steering pause (e.g., true). Variants: true, false. Use 'default' to inherit admin setting.",
+    )

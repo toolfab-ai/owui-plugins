@@ -32,26 +32,30 @@ class TestIsSafeUrl:
     def setup_method(self) -> None:
         self.pipe = Pipe()
 
-    def test_public_url_safe(self) -> None:
+    @pytest.mark.asyncio
+    async def test_public_url_safe(self) -> None:
         # Standard public websites should be safe
-        assert self.pipe._is_safe_url("https://www.google.com") is True
-        assert self.pipe._is_safe_url("https://example.com/some/path") is True
+        assert await self.pipe._is_safe_url("https://www.google.com") is True
+        assert await self.pipe._is_safe_url("https://example.com/some/path") is True
 
-    def test_localhost_unsafe(self) -> None:
+    @pytest.mark.asyncio
+    async def test_localhost_unsafe(self) -> None:
         # Loopback is unsafe
-        assert self.pipe._is_safe_url("http://localhost") is False
-        assert self.pipe._is_safe_url("http://127.0.0.1:8080") is False
+        assert await self.pipe._is_safe_url("http://localhost") is False
+        assert await self.pipe._is_safe_url("http://127.0.0.1:8080") is False
 
-    def test_private_subnets_unsafe(self) -> None:
+    @pytest.mark.asyncio
+    async def test_private_subnets_unsafe(self) -> None:
         # RFC1918 networks are unsafe
-        assert self.pipe._is_safe_url("http://10.0.0.1") is False
-        assert self.pipe._is_safe_url("https://192.168.1.1/admin") is False
-        assert self.pipe._is_safe_url("http://172.16.0.1") is False
+        assert await self.pipe._is_safe_url("http://10.0.0.1") is False
+        assert await self.pipe._is_safe_url("https://192.168.1.1/admin") is False
+        assert await self.pipe._is_safe_url("http://172.16.0.1") is False
 
-    def test_malformed_url_unsafe(self) -> None:
+    @pytest.mark.asyncio
+    async def test_malformed_url_unsafe(self) -> None:
         # Malformed URLs or unsupported schemes should be unsafe
-        assert self.pipe._is_safe_url("ftp://ftp.example.com") is False
-        assert self.pipe._is_safe_url("not_a_url") is False
+        assert await self.pipe._is_safe_url("ftp://ftp.example.com") is False
+        assert await self.pipe._is_safe_url("not_a_url") is False
 
 
 @pytest.mark.unit
@@ -76,12 +80,24 @@ class TestScrapeUrl:
 
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.text = html_content
+
+        async def mock_aiter_text():
+            yield html_content
+
+        mock_response.aiter_text = mock_aiter_text
+        mock_response.headers = {
+            "content-type": "text/html; charset=utf-8",
+            "content-length": str(len(html_content)),
+        }
         mock_response.raise_for_status = MagicMock()
 
         mock_client = AsyncMock()
         mock_client.__aenter__.return_value = mock_client
-        mock_client.get.return_value = mock_response
+        mock_client.stream = MagicMock()
+
+        mock_stream_ctx = AsyncMock()
+        mock_stream_ctx.__aenter__.return_value = mock_response
+        mock_client.stream.return_value = mock_stream_ctx
 
         # Use mock getaddrinfo to bypass real DNS / protect against SSRF checks
         with (
@@ -100,16 +116,17 @@ class TestScrapeUrl:
             assert "Menu" not in result["content"]
             assert "Main body text of the article." in result["content"]
 
-            mock_client_cls.assert_called_once_with(timeout=5.0, follow_redirects=True)
-            mock_client.get.assert_called_once()
-            _, kwargs = mock_client.get.call_args
+            mock_client_cls.assert_called_once_with(timeout=5.0, follow_redirects=False)
+            mock_client.stream.assert_called_once()
+            _, kwargs = mock_client.stream.call_args
             assert "User-Agent" in kwargs["headers"]
 
     @pytest.mark.asyncio
     async def test_scrape_url_timeout(self) -> None:
         mock_client = AsyncMock()
         mock_client.__aenter__.return_value = mock_client
-        mock_client.get.side_effect = httpx.TimeoutException("Request timed out")
+        mock_client.stream = MagicMock()
+        mock_client.stream.side_effect = httpx.TimeoutException("Request timed out")
 
         with (
             patch(

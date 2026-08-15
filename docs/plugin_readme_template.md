@@ -12,6 +12,10 @@ What are its unique features }
 
 { Short description of a problem that plugin is solving }
 
+## Requirements (Optional)
+
+{ list of any external dependencies, API keys, or self-hosted services required for the plugin to function }
+
 ## Valves (Configuration)
 
 { list of all admin valves with their description and possible values }

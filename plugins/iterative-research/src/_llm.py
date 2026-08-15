@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+from datetime import datetime
 from typing import Any
 
 try:
@@ -21,6 +22,11 @@ logger = logging.getLogger(__name__)
 
 class LLMMixin:
     """LLM orchestration, model resolution, and response parsing utilities."""
+
+    def _get_datetime_context(self) -> str:
+        """Return a standard UTC date-time string for prompt injection."""
+        now = datetime.utcnow()
+        return f"Current Date: {now.strftime('%Y-%m-%d')} ({now.strftime('%A')}) UTC\n"
 
     async def _get_backend_model(self, body: dict[str, Any]) -> str:
         """Resolve the best backend model to use for completion."""

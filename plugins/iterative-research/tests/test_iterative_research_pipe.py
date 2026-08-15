@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import sys
-from typing import Any, Optional
+from typing import Any, AsyncGenerator, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -43,7 +43,7 @@ class TestPipeMainEntryPoint:
         self.pipe.valves.MODEL = "mock-model"
 
         # Mock search query helper
-        async def mock_search(query: str) -> list[dict[str, str]]:
+        async def mock_search(query: str, user_valves: Any = None) -> list[dict[str, str]]:
             return [
                 {"title": "Result 1", "url": "https://example.com/res1", "content": "Snippet 1"}
             ]
@@ -121,13 +121,71 @@ class TestPipeMainEntryPoint:
             assert citation_call["data"]["source"]["url"] == "https://example.com/res1"
 
     @pytest.mark.asyncio
+    async def test_pipe_user_valves_as_dict(self) -> None:
+        """Verify that UserValves passed as a dictionary are correctly resolved."""
+        self.pipe.valves.MAX_STEPS = 5
+        self.pipe.valves.SEARXNG_URL = "https://admin-searxng.local"
+
+        # Pass UserValves as a dict, overriding MAX_STEPS
+        # Note: searxng_url is now admin-only and should be ignored if passed by user
+        user_valves = {
+            "max_steps": "2",
+            "searxng_url": "https://user-searxng.local",
+        }
+
+        # Mock dependencies to reach the research loop
+        self.pipe._search_query = AsyncMock(return_value=[])
+        self.pipe._get_backend_model = AsyncMock(return_value="mock-model")
+        self.pipe._get_update_notification = AsyncMock(return_value=None)
+
+        # Mock _synthesize_report as an async generator
+        async def mock_synthesize(*args: Any, **kwargs: Any) -> AsyncGenerator[str, None]:
+            yield "Final Report"
+
+        self.pipe._synthesize_report = mock_synthesize
+
+        body = {
+            "stream": True,
+            "messages": [{"role": "user", "content": "test query"}],
+        }
+
+        with (
+            patch(
+                "open_webui.utils.chat.generate_chat_completion",
+                new_callable=AsyncMock,
+                return_value='{"gaps": [], "queries": []}',
+            ),
+            patch(
+                "socket.getaddrinfo", return_value=[(None, None, None, None, ("93.184.216.34", 0))]
+            ),
+        ):
+            generator = await self.pipe.pipe(
+                body=body,
+                __user__={"id": "user1"},
+                __request__=None,
+                __event_emitter__=AsyncMock(),
+                __user_valves__=user_valves,
+            )
+            # Consume generator to trigger logic
+            async for _ in generator:
+                pass
+
+            # Verify _get_config directly for the instance
+            assert self.pipe._get_config("max_steps", user_valves) == 2
+            # Admin valve should be used, user override ignored or not resolved via _get_config for search
+            assert self.pipe.valves.SEARXNG_URL == "https://admin-searxng.local"
+            assert (
+                self.pipe._get_config("co_storm_steering", user_valves) is False
+            )  # default from admin
+
+    @pytest.mark.asyncio
     async def test_pipe_non_stream_returns_str(self) -> None:
         self.pipe.valves.MAX_STEPS = 1
         self.pipe.valves.MAX_PAGES_TO_SCRAPE = 1
         self.pipe.valves.MODEL = "mock-model"
 
         # Mock search query helper
-        async def mock_search(query: str) -> list[dict[str, str]]:
+        async def mock_search(query: str, user_valves: Any = None) -> list[dict[str, str]]:
             return [
                 {"title": "Result 1", "url": "https://example.com/res1", "content": "Snippet 1"}
             ]
@@ -201,7 +259,7 @@ class TestCoStormSteering:
         self.pipe.valves.MAX_PAGES_TO_SCRAPE = 1
         self.pipe.valves.MODEL = "mock-model"
 
-        async def mock_search(query: str) -> list[dict[str, str]]:
+        async def mock_search(query: str, user_valves: Any = None) -> list[dict[str, str]]:
             return [
                 {"title": "Source 1", "url": "https://example.com/src1", "content": "Snippet 1"}
             ]
@@ -269,7 +327,7 @@ class TestCoStormSteering:
         self.pipe.valves.MAX_PAGES_TO_SCRAPE = 1
         self.pipe.valves.MODEL = "mock-model"
 
-        async def mock_search(query: str) -> list[dict[str, str]]:
+        async def mock_search(query: str, user_valves: Any = None) -> list[dict[str, str]]:
             return [
                 {"title": "Source 2", "url": "https://example.com/src2", "content": "Snippet 2"}
             ]

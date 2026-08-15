@@ -1,8 +1,9 @@
 """
 title: Iterative Deep Research Agent
-author: @philipp
-author_url: https://github.com/skorphil
-version: 0.1.0-beta.1
-description: Iterative Deep Research Pipe executes autonomous multi-turn web search & scraping loops to synthesize detailed cited reports.
+author: toolfab-ai
+author_url: https://github.com/toolfab-ai/
+version: 0.9.0
+description: Autonomous multi-turn web search & scraping loops to synthesize detailed cited research-reports.
 license: MIT
+github: https://github.com/toolfab-ai/owui-plugins
 """

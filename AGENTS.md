@@ -14,5 +14,6 @@ Each plugin lives under `plugins/*/` and is its own `uv`-managed package.
 - [valves_conventions](docs/valves_conventions.md)
 - [plugin_qa](docs/plugin_qa.md)
 - [plugin_readme_template](docs/plugin_readme_template.md)
+- [plugin_meta_template](docs/plugin_meta_template)
 - [release](docs/release.md)
 

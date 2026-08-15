@@ -8,10 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- 
 
 ### Fixed
-- 
+
+## [0.9.0] - 2026-08-15
+
+### Added
+- Temporal awareness: Automatic UTC date-time injection into LLM prompts for search planning and report synthesis.
+
+### Fixed
+- Robust configuration resolution: Support for `UserValves` passed as standard Python dictionaries, fixing issues with per-user overrides for SearXNG URL and Co-STORM steering.
+- Resilience: Improved `pipe` entry point to correctly resolve valves from `__user__` object context.
 
 ## [0.1.0-beta.1] - 2026-08-15
 
