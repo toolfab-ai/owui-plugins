@@ -1,4 +1,5 @@
 import importlib.util
+import sys
 from pathlib import Path
 
 
@@ -33,6 +34,7 @@ def load_plugin(plugin_name: str):
             mod_name = plugin_name.replace("-", "_")
             spec = importlib.util.spec_from_file_location(mod_name, candidate)
             mod = importlib.util.module_from_spec(spec)
+            sys.modules[mod_name] = mod
             spec.loader.exec_module(mod)
             return mod
     raise FileNotFoundError(

@@ -10,8 +10,9 @@ Each plugin lives under `plugins/*/` and is its own `uv`-managed package.
 - `tests/` — shared/integration tests
 
 ## Development Guidelines
-[plugin_development](docs/plugin_development.md)
-[plugin_qa](docs/plugin_qa.md)
-[plugin_readme_template](docs/plugin_readme_template.md)
-[release](docs/release.md)
+- [plugin_development](docs/plugin_development.md)
+- [valves_conventions](docs/valves_conventions.md)
+- [plugin_qa](docs/plugin_qa.md)
+- [plugin_readme_template](docs/plugin_readme_template.md)
+- [release](docs/release.md)
 

@@ -55,95 +55,7 @@ jobs:
 
       - name: Generate release body
         id: body
-        shell: python
-        run: |
-            import hashlib
-            import os
-            import re
-            import sys
-            from pathlib import Path
-
-            plugin = os.environ["plugin"]
-            version = os.environ["version"]
-            
-            print(f"--- Processing {plugin} v{version} ---")
-            
-            # 1. Extract Changelog
-            changelog_path = Path(f"plugins/{plugin}/CHANGELOG.md")
-            if not changelog_path.exists():
-                print(f"::error::Missing CHANGELOG.md for plugin {plugin}")
-                sys.exit(1)
-
-            changelog_content = changelog_path.read_text(encoding="utf-8")
-            
-            # Line-by-line extraction for robustness
-            header_pattern = rf"^## \[{re.escape(version)}\](?: - \d{{4}}-\d{{2}}-\d{{2}})?\s*$"
-            lines = changelog_content.splitlines()
-            start_idx = -1
-            for i, line in enumerate(lines):
-                if re.match(header_pattern, line):
-                    start_idx = i + 1
-                    break
-            
-            if start_idx == -1:
-                print(f"::error::Version {version} header not found in CHANGELOG.md")
-                # Print available headers for debugging
-                print("Available headers:")
-                for line in lines:
-                    if line.startswith("## ["):
-                        print(f"  {line}")
-                sys.exit(1)
-            
-            content_lines = []
-            for i in range(start_idx, len(lines)):
-                if lines[i].startswith("## ["):
-                    break
-                content_lines.append(lines[i])
-            
-            changelog_text = "\n".join(content_lines).strip()
-            print(f"Extracted changelog ({len(changelog_text)} chars)")
-
-            # 2. Calculate Checksum
-            plugin_file = Path(f"plugins/{plugin}/plugin.py")
-            if not plugin_file.exists():
-                print(f"::error::Built plugin file not found: {plugin_file}")
-                sys.exit(1)
-            
-            sha256_hash = hashlib.sha256()
-            with open(plugin_file, "rb") as f:
-                for byte_block in iter(lambda: f.read(4096), b""):
-                    sha256_hash.update(byte_block)
-            checksum = sha256_hash.hexdigest()
-
-            # 3. Prepare Template
-            template_path = Path("scripts/release_template.md")
-            if not template_path.exists():
-                print(f"::error::Missing scripts/release_template.md")
-                sys.exit(1)
-            
-            template = template_path.read_text(encoding="utf-8")
-            
-            values = {
-                "{plugin}": plugin,
-                "{version}": version,
-                "{repo}": os.environ["GITHUB_REPOSITORY"],
-                "{tag}": os.environ["tag"],
-                "{status_note}": os.environ.get("status_note", ""),
-                "{changelog}": changelog_text,
-                "{checksum}": checksum
-            }
-            
-            body = template
-            for placeholder, value in values.items():
-                body = body.replace(placeholder, value)
-            
-            # 4. Set output
-            with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-                f.write("body<<EOF\n")
-                f.write(body + "\n")
-                f.write("EOF\n")
-            
-            print("Successfully generated release body")
+        run: uv run python scripts/prepare_release.py
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -151,6 +63,8 @@ jobs:
             name: "${{ env.plugin }} v${{ env.version }}"
             tag_name: ${{ github.ref_name }}
             body: ${{ steps.body.outputs.body }}
-            files: plugins/${{ env.plugin }}/plugin.py
+            files: |
+              plugins/${{ env.plugin }}/plugin.py
+              plugins/${{ env.plugin }}/README.md
             generate_release_notes: false
             prerelease: ${{ env.is_prerelease == 'true' }}

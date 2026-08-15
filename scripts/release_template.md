@@ -12,6 +12,7 @@ https://github.com/{repo}/releases/download/{tag}/plugin.py
 ### Static Assets
 
 *   **Plugin:** [plugin.py](https://github.com/{repo}/releases/download/{tag}/plugin.py) (Immutable snapshot)
+*   **Documentation:** [README.md](https://github.com/{repo}/releases/download/{tag}/README.md) (Plugin overview)
 *   **SHA-256:** `{checksum}`
 
 ### Changelog
