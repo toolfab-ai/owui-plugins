@@ -1,0 +1,9 @@
+[project]
+name = "iterative-research-pipe"
+version = "0.1.0-beta.1"
+description = "Iterative Deep Research Pipe for Open WebUI"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx",
+    "beautifulsoup4",
+]

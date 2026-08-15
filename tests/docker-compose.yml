@@ -4,10 +4,22 @@ services:
     ports:
       - "${OWUI_PORT:-3000}:8080"
     environment:
-      WEBUI_SECRET_KEY: owui-test-secret-key
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      - WEBUI_SECRET_KEY=owui-test-secret-key
+      - "OPENAI_API_KEY=${OPENAI_API_KEY:-}"
+      - ENABLE_SIGNUP=True
+      - DEFAULT_USER_ROLE=user
+      # - "GUNICORN_CMD_ARGS=--timeout 0 --keep-alive 65 --threads 4"
+      # - AIOHTTP_CLIENT_TIMEOUT=0
+      # - WEBUI_MAX_WORKERS=4
+      # - ENABLE_GZIP=False
+      # - ENABLE_HTTP2=True
+      - ENABLE_TITLE_GENERATION=False
+      - ENABLE_IMAGE_GENERATION=False
+      - "CORS_ALLOW_ORIGIN=${CORS_ALLOW_ORIGIN:-*}"
+      - "WEBUI_URL=${WEBUI_URL:-}"
+      - "ALLOWED_HOSTS=*"
     volumes:
       - owui-test-data:/app/backend/data
 
 volumes:
-  owui-test-data:
+  owui-test-data: {}

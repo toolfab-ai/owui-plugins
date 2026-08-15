@@ -1,4 +1,5 @@
 ## {plugin} v{version}
+{status_note}
 
 ### Install via URL
 
@@ -8,9 +9,10 @@ Paste this URL into **Open WebUI → Admin → Tools/Functions → Install from 
 https://github.com/{repo}/releases/download/{tag}/plugin.py
 ```
 
-### Direct download
+### Static Assets
 
-[plugin.py](https://github.com/{repo}/releases/download/{tag}/plugin.py)
+*   **Plugin:** [plugin.py](https://github.com/{repo}/releases/download/{tag}/plugin.py) (Immutable snapshot)
+*   **SHA-256:** `{checksum}`
 
 ### Changelog
 

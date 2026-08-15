@@ -9,11 +9,9 @@ Each plugin lives under `plugins/*/` and is its own `uv`-managed package.
 - `conftest.py` — shared pytest fixtures and markers (`integration`, `unit`)
 - `tests/` — shared/integration tests
 
+## Development Guidelines
+[plugin_development](docs/plugin_development.md)
+[plugin_qa](docs/plugin_qa.md)
+[plugin_readme_template](docs/plugin_readme_template.md)
+[release](docs/release.md)
 
-## General conventions
-
-- Python 3.11+, target-version `py311`
-- Ruff linting with `E`, `F`, `I`, `N`, `W` (line-length 100, ignore `E501`)
-- pytest with `asyncio_mode = auto`
-- `integration` marker requires a running Open WebUI container
-- `unit` marker does not require a container

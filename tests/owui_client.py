@@ -123,3 +123,163 @@ class OwuiClient:
         if resp.status_code == 200:
             return resp.json()
         raise RuntimeError(f"Delete tool failed ({resp.status_code}): {resp.text}")
+
+    # ── Function (Action / Filter / Pipe / Event) endpoints ────────────────
+
+    async def create_function(
+        self, function_id: str, name: str, content: str, description: str = ""
+    ) -> dict[str, Any]:
+        resp = await self._request(
+            "POST",
+            "/api/v1/functions/create",
+            json={
+                "id": function_id,
+                "name": name,
+                "content": content,
+                "meta": {"description": description},
+            },
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        raise RuntimeError(f"Create function failed ({resp.status_code}): {resp.text}")
+
+    async def get_functions(self) -> list[dict[str, Any]]:
+        resp = await self._request("GET", "/api/v1/functions/list")
+        if resp.status_code == 200:
+            return resp.json()
+        raise RuntimeError(f"Get functions failed ({resp.status_code}): {resp.text}")
+
+    async def get_function_by_id(self, function_id: str) -> dict[str, Any]:
+        resp = await self._request("GET", f"/api/v1/functions/id/{function_id}")
+        if resp.status_code == 200:
+            return resp.json()
+        raise RuntimeError(f"Get function by id failed ({resp.status_code}): {resp.text}")
+
+    async def get_function_valves_spec(self, function_id: str) -> dict[str, Any]:
+        resp = await self._request("GET", f"/api/v1/functions/id/{function_id}/valves/spec")
+        if resp.status_code == 200:
+            return resp.json()
+        raise RuntimeError(f"Get function valve spec failed ({resp.status_code}): {resp.text}")
+
+    async def update_function_valves(
+        self, function_id: str, valves: dict[str, Any]
+    ) -> dict[str, Any]:
+        resp = await self._request(
+            "POST",
+            f"/api/v1/functions/id/{function_id}/valves/update",
+            json=valves,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        raise RuntimeError(f"Update function valves failed ({resp.status_code}): {resp.text}")
+
+    async def delete_function(self, function_id: str) -> bool:
+        resp = await self._request("DELETE", f"/api/v1/functions/id/{function_id}/delete")
+        if resp.status_code == 200:
+            return resp.json()
+        raise RuntimeError(f"Delete function failed ({resp.status_code}): {resp.text}")
+
+    async def toggle_function(self, function_id: str) -> dict[str, Any]:
+        resp = await self._request("POST", f"/api/v1/functions/id/{function_id}/toggle")
+        if resp.status_code == 200:
+            return resp.json()
+        raise RuntimeError(f"Toggle function failed ({resp.status_code}): {resp.text}")
+
+    async def update_function(
+        self, function_id: str, name: str, content: str, description: str = ""
+    ) -> dict[str, Any]:
+        resp = await self._request(
+            "POST",
+            f"/api/v1/functions/id/{function_id}/update",
+            json={
+                "id": function_id,
+                "name": name,
+                "content": content,
+                "meta": {"description": description},
+            },
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        raise RuntimeError(f"Update function failed ({resp.status_code}): {resp.text}")
+
+    async def get_users(self) -> list[dict[str, Any]]:
+        resp = await self._request("GET", "/api/v1/users/")
+        if resp.status_code == 200:
+            return resp.json()
+        raise RuntimeError(f"Get users failed ({resp.status_code}): {resp.text}")
+
+    async def get_models(self) -> list[dict[str, Any]]:
+        resp = await self._request("GET", "/api/models")
+        if resp.status_code == 200:
+            return resp.json()
+        raise RuntimeError(f"Get models failed ({resp.status_code}): {resp.text}")
+
+    async def update_model_access(self, model_id: str, access_grants: list[dict]) -> dict[str, Any]:
+        resp = await self._request(
+            "POST",
+            "/api/v1/models/model/access/update",
+            json={"id": model_id, "access_grants": access_grants},
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        raise RuntimeError(f"Update model access failed ({resp.status_code}): {resp.text}")
+
+    async def update_tool_access(self, tool_id: str, access_grants: list[dict]) -> dict[str, Any]:
+        resp = await self._request(
+            "POST",
+            f"/api/v1/tools/id/{tool_id}/access/update",
+            json={"access_grants": access_grants},
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        raise RuntimeError(f"Update tool access failed ({resp.status_code}): {resp.text}")
+
+    async def admin_create_user(
+        self, name: str, email: str, password: str, role: str = "user"
+    ) -> dict[str, Any]:
+        resp = await self._request(
+            "POST",
+            "/api/v1/auths/add",
+            json={
+                "name": name,
+                "email": email,
+                "password": password,
+                "role": role,
+                "profile_image_url": "/user.png",
+            },
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        raise RuntimeError(f"Admin create user failed ({resp.status_code}): {resp.text}")
+
+    async def get_openai_config(self) -> dict[str, Any]:
+        resp = await self._request("GET", "/api/v1/openai/config")
+        if resp.status_code == 200:
+            return resp.json()
+        raise RuntimeError(f"Get OpenAI config failed ({resp.status_code}): {resp.text}")
+
+    async def update_openai_config(self, config: dict[str, Any]) -> dict[str, Any]:
+        # Ensure all required fields for OpenAIConfigForm are present
+        payload = {
+            "ENABLE_OPENAI_API": config.get("ENABLE_OPENAI_API", True),
+            "OPENAI_API_BASE_URLS": config.get("OPENAI_API_BASE_URLS", []),
+            "OPENAI_API_KEYS": config.get("OPENAI_API_KEYS", []),
+            "OPENAI_API_CONFIGS": config.get("OPENAI_API_CONFIGS", {}),
+        }
+        # The openai router is usually mounted at /openai, not /api/v1/openai
+        resp = await self._request("POST", "/openai/config/update", json=payload)
+        if resp.status_code == 200:
+            return resp.json()
+        raise RuntimeError(f"Update OpenAI config failed ({resp.status_code}): {resp.text}")
+
+    async def update_base_config(self, config: dict[str, Any]) -> dict[str, Any]:
+        resp = await self._request("POST", "/api/v1/configs/update", json=config)
+        if resp.status_code == 200:
+            return resp.json()
+        raise RuntimeError(f"Update base config failed ({resp.status_code}): {resp.text}")
+
+    async def get_base_config(self) -> dict[str, Any]:
+        resp = await self._request("GET", "/api/config")
+        if resp.status_code == 200:
+            return resp.json()
+        raise RuntimeError(f"Get base config failed ({resp.status_code}): {resp.text}")

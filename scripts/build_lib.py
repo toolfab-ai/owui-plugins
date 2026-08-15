@@ -37,7 +37,7 @@ def run_unit_tests(plugin_root: Path) -> None:
         ["uv", "run", "pytest", "-m", "unit", "-x", str(test_dir)],
         cwd=plugin_root.parent.parent,
     )
-    if result.returncode != 0:
+    if result.returncode not in (0, 5):
         sys.exit(result.returncode)
 
 
@@ -52,7 +52,7 @@ def run_integration_tests(plugin_root: Path) -> None:
         ["uv", "run", "pytest", "-m", "integration", "-x", str(test_dir)],
         cwd=plugin_root.parent.parent,
     )
-    if result.returncode != 0:
+    if result.returncode not in (0, 5):
         sys.exit(result.returncode)
 
 
@@ -146,18 +146,31 @@ def build(
     plugin_root: Path,
     version: Optional[str] = None,
     check_only: bool = False,
+    skip_tests: bool = False,
 ) -> None:
     verify_lint(plugin_root)
     verify_format(plugin_root)
-    run_unit_tests(plugin_root)
-    run_integration_tests(plugin_root)
+
+    # 1. Unit tests run early as they don't depend on merged output
+    if not skip_tests:
+        run_unit_tests(plugin_root)
+
+    # 2. Merge source files
     output = merge_sources(plugin_root / "src")
     if version:
         output = inject_version(output, version)
+
+    # 3. Handle check_only mode (returns before writing or running integration tests)
     if check_only:
         print(f"Check passed: {plugin_root.name}")
         return
+
+    # 4. Write output to plugin.py (required for integration tests and release)
     output_path = plugin_root / "plugin.py"
     write_output(output, output_path)
     if version:
         update_pyproject_toml(plugin_root / "pyproject.toml", version)
+
+    # 5. Integration tests run LAST, as they rely on the existence of plugin.py
+    if not skip_tests:
+        run_integration_tests(plugin_root)

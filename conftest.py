@@ -17,43 +17,43 @@ def owui_url() -> str:
     """
     url = os.environ.get("OWUI_URL")
     if url:
-        return url
-
-    compose_file = Path(__file__).parent / "tests" / "docker-compose.yml"
-    port = os.environ.get("OWUI_PORT", "3000")
-    env = os.environ.copy()
-    env["OWUI_PORT"] = port
-
-    subprocess.run(
-        ["docker", "compose", "-f", str(compose_file), "up", "-d", "--remove-orphans"],
-        check=True,
-        env=env,
-    )
-
-    url = f"http://localhost:{port}"
-
-    deadline = time.time() + 120
-    while time.time() < deadline:
-        try:
-            r = httpx.get(f"{url}/api/auth", timeout=5.0)
-            if r.status_code == 200:
-                break
-        except (httpx.ConnectError, httpx.TimeoutException):
-            pass
-        time.sleep(2)
+        yield url
     else:
+        compose_file = Path(__file__).parent / "tests" / "docker-compose.yml"
+        port = os.environ.get("OWUI_PORT", "3000")
+        env = os.environ.copy()
+        env["OWUI_PORT"] = port
+
+        subprocess.run(
+            ["docker", "compose", "-f", str(compose_file), "up", "-d", "--remove-orphans"],
+            check=True,
+            env=env,
+        )
+
+        url = f"http://localhost:{port}"
+
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            try:
+                r = httpx.get(f"{url}/api/auth", timeout=5.0)
+                if r.status_code == 200:
+                    break
+            except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException):
+                pass
+            time.sleep(2)
+        else:
+            subprocess.run(
+                ["docker", "compose", "-f", str(compose_file), "down", "-v"],
+                env=env,
+            )
+            raise RuntimeError(f"Open WebUI did not become ready within 120s at {url}")
+
+        yield url
+
         subprocess.run(
             ["docker", "compose", "-f", str(compose_file), "down", "-v"],
             env=env,
         )
-        raise RuntimeError(f"Open WebUI did not become ready within 120s at {url}")
-
-    yield url
-
-    subprocess.run(
-        ["docker", "compose", "-f", str(compose_file), "down", "-v"],
-        env=env,
-    )
 
 
 @pytest.fixture
