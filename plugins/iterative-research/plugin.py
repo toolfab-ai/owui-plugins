@@ -3,6 +3,7 @@ title: Iterative Deep Research Agent
 author: toolfab-ai
 author_url: https://github.com/toolfab-ai/
 version: 0.9.2
+requirements: httpx, beautifulsoup4
 description: Autonomous multi-turn web search & scraping loops to synthesize detailed cited research-reports.
 license: MIT
 github: https://github.com/toolfab-ai/owui-plugins
@@ -47,6 +48,7 @@ class CitationsMixin:
                 },
             }
         )
+
 
 
 import json
@@ -97,7 +99,19 @@ class LLMMixin:
         model_id: str,
     ) -> str:
         """Invoke generate_chat_completion with system and user prompts."""
-        from open_webui.utils.chat import generate_chat_completion
+        generate_chat_completion = None
+        try:
+            from open_webui.utils.chat import generate_chat_completion
+        except ImportError:
+            try:
+                from open_webui.apps.webui.utils.chat import generate_chat_completion
+            except ImportError:
+                logger.warning("Could not import generate_chat_completion from open_webui")
+                generate_chat_completion = None
+
+        if generate_chat_completion is None:
+            logger.warning("generate_chat_completion is None, skipping LLM call")
+            return "Warning: Chat completion engine not available."
 
         payload = {
             "model": model_id,
@@ -156,7 +170,9 @@ class LLMMixin:
             return {"gaps": ["Manual parsing fallback"], "queries": queries[:3]}
 
 
+
 import asyncio
+import inspect
 import logging
 import re
 from typing import Any, AsyncGenerator, Awaitable, Callable, Optional
@@ -223,15 +239,24 @@ class ResearchMixin:
         user_id = __user__.get("id") if __user__ else None
         user_obj = None
         if user_id:
+            # We use noqa: N806 for variable naming since Users is a class name being imported dynamically.
+            Users = None  # noqa: N806
             try:
                 from open_webui.models.users import Users
-
-                user_obj = await Users.get_user_by_id(user_id)
-            except Exception:
+            except ImportError:
                 try:
-                    from open_webui.models.users import Users
+                    from open_webui.apps.webui.models.users import Users
+                except ImportError:
+                    logger.warning("Could not import Users from open_webui")
+                    Users = None  # noqa: N806
 
-                    user_obj = Users.get_user_by_id(user_id)
+            if Users is not None:
+                try:
+                    res = Users.get_user_by_id(user_id)
+                    if inspect.isawaitable(res) or asyncio.iscoroutine(res):
+                        user_obj = await res
+                    else:
+                        user_obj = res
                 except Exception as e:
                     logger.warning("Could not load user object: %s", e)
 

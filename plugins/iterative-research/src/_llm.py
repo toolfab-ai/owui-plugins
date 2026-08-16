@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import logging
 import re
@@ -46,7 +48,19 @@ class LLMMixin:
         model_id: str,
     ) -> str:
         """Invoke generate_chat_completion with system and user prompts."""
-        from open_webui.utils.chat import generate_chat_completion
+        generate_chat_completion = None
+        try:
+            from open_webui.utils.chat import generate_chat_completion
+        except ImportError:
+            try:
+                from open_webui.apps.webui.utils.chat import generate_chat_completion
+            except ImportError:
+                logger.warning("Could not import generate_chat_completion from open_webui")
+                generate_chat_completion = None
+
+        if generate_chat_completion is None:
+            logger.warning("generate_chat_completion is None, skipping LLM call")
+            return "Warning: Chat completion engine not available."
 
         payload = {
             "model": model_id,
