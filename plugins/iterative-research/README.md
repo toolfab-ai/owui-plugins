@@ -1,6 +1,13 @@
-## Quick start
+## Requirements
 
-To start using the **Iterative Deep Research** plugin in your Open WebUI workspace, follow these simple steps:
+This plugin requires one of the following search providers to be configured:
+
+- **SearXNG** (free): A self-hosted SearXNG instance URL (e.g., `http://localhost:8080`).
+- **Tavily AI** (paid): A valid Tavily API key (get one at [tavily.com](https://tavily.com)).
+
+---
+
+## Quick start
 
 1. **Enable and Configure Web Search**: Go to Open WebUI **Admin Settings** -> **Functions** -> **Iterative Research** -> **Valves**.
    - Input your self-hosted **SearXNG URL** (e.g., `http://localhost:8080` or `http://searxng:8080`) or provide a **Tavily API Key** (https://tavily.com).
@@ -39,15 +46,6 @@ As Open WebUI enters the "Platform Era" of agentic workspaces, the limitations o
 5. **Security and SSRF Vulnerabilities**: Naive python-based scrapers run the risk of scanning internal corporate networks (private IP addresses), introducing severe security gaps if exposed to adversarial user prompts.
 
 The **Iterative Deep Research Agent** solves these limitations by providing a transparent, self-correcting, secure, and deeply rigorous research loop native to the Open WebUI experience.
-
----
-
-## Requirements
-
-This plugin requires one of the following search providers to be configured:
-
-- **SearXNG**: A self-hosted SearXNG instance URL (e.g., `http://localhost:8080`).
-- **Tavily AI**: A valid Tavily API key (get one at [tavily.com](https://tavily.com)).
 
 ---
 
