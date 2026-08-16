@@ -8,8 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Explicit `requirements` metadata field for automated dependency provisioning in isolated environments (v10+).
 
 ### Fixed
+- **Open WebUI v11 Compatibility**: Refactored internal imports (`Models`, `generate_chat_completion`) to support both legacy and modern `open_webui` namespaces.
+- **Resilience**: Implemented dynamic sync/async resolution for `Users` model calls to ensure stability across database driver upgrades.
 
 ## [0.9.2] - 2026-08-15
 
