@@ -1,3 +1,7 @@
+## Requirements (Optional)
+
+{ list of any external dependencies, API keys, or self-hosted services required for the plugin to function }
+
 ## Quick start
 
 { Step by step guide how to use plugin }
@@ -11,10 +15,6 @@ What are its unique features }
 ## Problem Statement
 
 { Short description of a problem that plugin is solving }
-
-## Requirements (Optional)
-
-{ list of any external dependencies, API keys, or self-hosted services required for the plugin to function }
 
 ## Valves (Configuration)
 
