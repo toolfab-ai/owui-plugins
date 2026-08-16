@@ -69,6 +69,26 @@ class SynthesisMixin:
         report = await self._call_llm(
             __request__, user_obj, system_prompt, user_prompt, backend_model
         )
+        if not report or not report.strip():
+            yield (
+                f"> ⚠️ **Error**: Final synthesis failed due to an empty response "
+                f"from model '{backend_model}'.\n"
+            )
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": (
+                                f"Critical Error: Final synthesis failed due to an empty "
+                                f"response from model '{backend_model}'."
+                            ),
+                            "done": True,
+                        },
+                    }
+                )
+            return
+
         yield report
 
         if __event_emitter__:

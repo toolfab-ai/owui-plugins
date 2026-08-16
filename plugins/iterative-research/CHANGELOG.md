@@ -8,8 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Pre-flight configuration validation to ensure at least one search engine (SearXNG or Tavily) is configured and a backend model is specified in the valves before execution.
+- Prominent inline, user-facing critical markdown warning banners at the very top of responses when configurations or backend models are missing or invalid.
+- Robust unit test coverage for validation rules, including only-Tavily, only-SearXNG, and unexpected falsy valve types.
+
+### Changed
+- Removed model auto-detection logic completely to strictly enforce manual MODEL configuration in valves and avoid unexpected database model lookups.
 
 ### Fixed
+- Misleading exit state ("All Information Gaps Resolved") when the planning LLM call failed or returned an empty response.
+- Runtime LLM failure handling in both planning and synthesis phases to raise clear inline errors and halt execution immediately, preventing token and API waste.
 
 ## [0.9.2] - 2026-08-15
 

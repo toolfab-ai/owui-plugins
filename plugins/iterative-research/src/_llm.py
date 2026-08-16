@@ -29,32 +29,13 @@ class LLMMixin:
         return f"Current Date: {now.strftime('%Y-%m-%d')} ({now.strftime('%A')}) UTC\n"
 
     async def _get_backend_model(self, body: dict[str, Any]) -> str:
-        """Resolve the best backend model to use for completion."""
-        # 1. Check if MODEL is configured in valves
+        """Resolve the best backend model to use for completion.
+
+        Returns "" if no model is configured.
+        """
         if hasattr(self, "valves") and self.valves.MODEL:
             return self.valves.MODEL
-
-        # 2. Check if we can find a non-pipe model in the workspace
-        try:
-            from open_webui.models.models import Models
-
-            all_models = await Models.get_all_models()
-            for m in all_models:
-                m_id = getattr(m, "id", None)
-                if not m_id and isinstance(m, dict):
-                    m_id = m.get("id")
-                if (
-                    m_id
-                    and m_id != "iterative_research"
-                    and m_id != "iterative_research_pipe"
-                    and "pipe" not in m_id
-                ):
-                    return m_id
-        except Exception as e:
-            logger.warning("Could not list models from Models: %s", e)
-
-        # 3. Fallback to some common default model ID
-        return "gpt-4o-mini"
+        return ""
 
     async def _call_llm(
         self,

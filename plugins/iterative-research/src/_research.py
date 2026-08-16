@@ -77,23 +77,46 @@ class ResearchMixin:
                 except Exception as e:
                     logger.warning("Could not load user object: %s", e)
 
-        # Warn if no search engine configured
+        # Pre-flight Search Engine Validation
         if not tavily_key and not searxng_url:
+            error_msg = (
+                "⚠️ **Configuration Error**: No search engine is configured. "
+                "Please configure either `TAVILY_API_KEY` or `SEARXNG_URL` in the admin valves."
+            )
+            logger.error("Pre-flight Validation Failed: No search engine configured.")
             if __event_emitter__:
                 await __event_emitter__(
                     {
                         "type": "status",
                         "data": {
-                            "description": (
-                                "Warning: No search engine (Tavily/SearXNG) configured. "
-                                "Relying on internal knowledge."
-                            ),
-                            "done": False,
+                            "description": "Configuration Error: No search engine configured.",
+                            "done": True,
                         },
                     }
                 )
+            yield error_msg
+            return
 
+        # Pre-flight Model Validation
         backend_model = await self._get_backend_model(body)
+        if not backend_model:
+            error_msg = (
+                "⚠️ **Configuration Error**: No backend model is specified. "
+                "Please specify a valid `MODEL` in the admin valves."
+            )
+            logger.error("Pre-flight Validation Failed: No backend model specified.")
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": "Configuration Error: No backend model specified.",
+                            "done": True,
+                        },
+                    }
+                )
+            yield error_msg
+            return
         scraped_sources: dict[str, dict[str, str]] = {}
 
         # Check for updates and show notification at the very top of the response
@@ -179,6 +202,27 @@ class ResearchMixin:
             planning_response = await self._call_llm(
                 __request__, user_obj, system_prompt, user_prompt, backend_model
             )
+            if not planning_response or not planning_response.strip():
+                yield "</thinking>\n\n"
+                yield (
+                    f"> ⚠️ **Error**: Failed to generate planning strategy using backend "
+                    f"model '{backend_model}'. The model may be invalid, offline, or misconfigured.\n"
+                )
+                if __event_emitter__:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": (
+                                    f"Critical Error: Failed to generate planning strategy "
+                                    f"using backend model '{backend_model}'."
+                                ),
+                                "done": True,
+                            },
+                        }
+                    )
+                return
+
             plan = self._parse_json_completions(planning_response)
             gaps = plan.get("gaps", [])
             queries = plan.get("queries", [])

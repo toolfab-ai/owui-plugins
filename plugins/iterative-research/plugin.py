@@ -80,32 +80,13 @@ class LLMMixin:
         return f"Current Date: {now.strftime('%Y-%m-%d')} ({now.strftime('%A')}) UTC\n"
 
     async def _get_backend_model(self, body: dict[str, Any]) -> str:
-        """Resolve the best backend model to use for completion."""
-        # 1. Check if MODEL is configured in valves
+        """Resolve the best backend model to use for completion.
+
+        Returns "" if no model is configured.
+        """
         if hasattr(self, "valves") and self.valves.MODEL:
             return self.valves.MODEL
-
-        # 2. Check if we can find a non-pipe model in the workspace
-        try:
-            from open_webui.models.models import Models
-
-            all_models = await Models.get_all_models()
-            for m in all_models:
-                m_id = getattr(m, "id", None)
-                if not m_id and isinstance(m, dict):
-                    m_id = m.get("id")
-                if (
-                    m_id
-                    and m_id != "iterative_research"
-                    and m_id != "iterative_research_pipe"
-                    and "pipe" not in m_id
-                ):
-                    return m_id
-        except Exception as e:
-            logger.warning("Could not list models from Models: %s", e)
-
-        # 3. Fallback to some common default model ID
-        return "gpt-4o-mini"
+        return ""
 
     async def _call_llm(
         self,
@@ -254,23 +235,46 @@ class ResearchMixin:
                 except Exception as e:
                     logger.warning("Could not load user object: %s", e)
 
-        # Warn if no search engine configured
+        # Pre-flight Search Engine Validation
         if not tavily_key and not searxng_url:
+            error_msg = (
+                "⚠️ **Configuration Error**: No search engine is configured. "
+                "Please configure either `TAVILY_API_KEY` or `SEARXNG_URL` in the admin valves."
+            )
+            logger.error("Pre-flight Validation Failed: No search engine configured.")
             if __event_emitter__:
                 await __event_emitter__(
                     {
                         "type": "status",
                         "data": {
-                            "description": (
-                                "Warning: No search engine (Tavily/SearXNG) configured. "
-                                "Relying on internal knowledge."
-                            ),
-                            "done": False,
+                            "description": "Configuration Error: No search engine configured.",
+                            "done": True,
                         },
                     }
                 )
+            yield error_msg
+            return
 
+        # Pre-flight Model Validation
         backend_model = await self._get_backend_model(body)
+        if not backend_model:
+            error_msg = (
+                "⚠️ **Configuration Error**: No backend model is specified. "
+                "Please specify a valid `MODEL` in the admin valves."
+            )
+            logger.error("Pre-flight Validation Failed: No backend model specified.")
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": "Configuration Error: No backend model specified.",
+                            "done": True,
+                        },
+                    }
+                )
+            yield error_msg
+            return
         scraped_sources: dict[str, dict[str, str]] = {}
 
         # Check for updates and show notification at the very top of the response
@@ -356,6 +360,27 @@ class ResearchMixin:
             planning_response = await self._call_llm(
                 __request__, user_obj, system_prompt, user_prompt, backend_model
             )
+            if not planning_response or not planning_response.strip():
+                yield "</thinking>\n\n"
+                yield (
+                    f"> ⚠️ **Error**: Failed to generate planning strategy using backend "
+                    f"model '{backend_model}'. The model may be invalid, offline, or misconfigured.\n"
+                )
+                if __event_emitter__:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": (
+                                    f"Critical Error: Failed to generate planning strategy "
+                                    f"using backend model '{backend_model}'."
+                                ),
+                                "done": True,
+                            },
+                        }
+                    )
+                return
+
             plan = self._parse_json_completions(planning_response)
             gaps = plan.get("gaps", [])
             queries = plan.get("queries", [])
@@ -787,6 +812,26 @@ class SynthesisMixin:
         report = await self._call_llm(
             __request__, user_obj, system_prompt, user_prompt, backend_model
         )
+        if not report or not report.strip():
+            yield (
+                f"> ⚠️ **Error**: Final synthesis failed due to an empty response "
+                f"from model '{backend_model}'.\n"
+            )
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": (
+                                f"Critical Error: Final synthesis failed due to an empty "
+                                f"response from model '{backend_model}'."
+                            ),
+                            "done": True,
+                        },
+                    }
+                )
+            return
+
         yield report
 
         if __event_emitter__:
@@ -1076,8 +1121,7 @@ class Valves(BaseModel):
     MODEL: str = Field(
         default="",
         description="The internal LLM model ID to use for research planning, gap analysis, "
-        "and final synthesis. If left empty, the plugin will attempt to auto-detect "
-        "an available model from the workspace.",
+        "and final synthesis. A valid model ID must be configured.",
     )
     MAX_STEPS: int = Field(
         default=3,

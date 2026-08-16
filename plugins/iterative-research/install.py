@@ -114,14 +114,17 @@ async def install():
             except RuntimeError:
                 logger.warning(f"Could not activate function: {pid}")
 
-        # Configure Default Valves (Enable Pre-release checking by default for this install)
+        # Configure Default Valves (Enable Pre-release checking and set stepfun model for testing)
         try:
-            valves_to_update = {"CHECK_PREVIEW_RELEASES": True}
+            valves_to_update = {
+                "CHECK_PREVIEW_RELEASES": True,
+                "MODEL": "stepfun/step-3.7-flash:free",
+            }
             if ptype == PTYPE_TOOL:
                 await client.update_tool_valves(pid, valves_to_update)
             else:
                 await client.update_function_valves(pid, valves_to_update)
-            logger.info(f"Enabled pre-release checking by default for {pid}")
+            logger.info(f"Configured default valves for {pid} (stepfun model set for testing)")
         except RuntimeError as e:
             logger.warning(f"Could not set default valves for {pid}: {e}")
 
