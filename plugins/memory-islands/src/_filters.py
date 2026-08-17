@@ -125,12 +125,25 @@ class FilterMixin:
             logger.exception("Error in Memory Islands inlet.")
         return body
 
-    async def outlet(self, body: Dict[str, Any]) -> Dict[str, Any]:
-        """After response, optionally extract new memories asynchronously."""
+    async def outlet(
+        self,
+        body: Dict[str, Any],
+        __user__: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """After response, optionally extract new memories asynchronously.
+
+        OWUI's ``outlet_filter_handler`` passes ``__user__`` as an extra param when the
+        handler declares it (see ``get_filter_params`` in ``open_webui/utils/filter.py``
+        and the ``__user__`` entry in the outlet ``extra_params`` in
+        ``open_webui/utils/middleware.py``). The outlet ``body`` carries a top-level
+        ``chat_id`` but no ``metadata``/``folder_id``, so auto-learning relies on the
+        user id to resolve the folder via the Chats model. ``__user__`` is optional to
+        stay backward compatible with callers that do not supply it.
+        """
         try:
             if not self.valves.AUTO_LEARN_MEMORIES:
                 return body
-            folder_id: Optional[str] = await self._resolve_folder(body)
+            folder_id: Optional[str] = await self._resolve_folder(body, (__user__ or {}).get("id"))
             if not folder_id:
                 return body
 

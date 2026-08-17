@@ -252,6 +252,41 @@ class TestFolderResolution:
             for record in caplog.records
         )
 
+    async def test_resolve_folder_chats_model_async_fallback(self, filter_plugin: Any) -> None:
+        """Verify the dynamic await handles an async ``Chats.get_chat_folder_id``.
+
+        ``Chats.get_chat_folder_id`` is ``async`` in OWUI v0.10+, so
+        ``_resolve_folder`` must await the returned coroutine instead of treating
+        it as a plain value.
+        """
+        mock_chats = MagicMock()
+        mock_chats.get_chat_folder_id = AsyncMock(return_value="folder-from-async-chats")
+        with patch.object(mod, "Chats", mock_chats):
+            body = {
+                "metadata": {"user_id": "user-1", "chat_id": "chat-xyz", "folder_id": None},
+            }
+            folder_id = await filter_plugin._resolve_folder(body, user_id="user-1")
+
+        assert folder_id == "folder-from-async-chats"
+        mock_chats.get_chat_folder_id.assert_called_once_with("chat-xyz", "user-1")
+
+    async def test_resolve_folder_chats_import_failure_returns_none(
+        self, filter_plugin: Any
+    ) -> None:
+        """Verify a missing Chats model (import failure) degrades gracefully.
+
+        When the ``open_webui`` imports fail at module load, ``Chats`` is ``None``.
+        ``_resolve_folder`` must return ``None`` without raising even when a valid
+        ``metadata.chat_id`` and ``user_id`` are present.
+        """
+        body = {
+            "metadata": {"user_id": "user-1", "chat_id": "chat-xyz", "folder_id": None},
+        }
+        with patch.object(mod, "Chats", None):
+            folder_id = await filter_plugin._resolve_folder(body, user_id="user-1")
+
+        assert folder_id is None
+
 
 # ========================================================================
 # DATA LOADING
@@ -412,6 +447,68 @@ class TestMemoryLearning:
             result = await filter_plugin.outlet(body)
 
         assert result == body
+        mock_create_task.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_outlet_resolves_folder_via_chats_model(self, filter_plugin: Any) -> None:
+        """Verify outlet auto-learning resolves a folder chat via the Chats model.
+
+        The OWUI outlet body carries a top-level ``chat_id`` but no ``metadata``,
+        ``folder_id`` or ``user_id``. The user id only arrives through the ``__user__``
+        reserved arg, which the framework passes when the handler declares it. Without
+        it, ``_resolve_folder`` cannot query ``Chats.get_chat_folder_id`` and auto-learning
+        silently no-ops for folder chats.
+        """
+        filter_plugin.valves.AUTO_LEARN_MEMORIES = True
+        mock_chats = MagicMock()
+        mock_chats.get_chat_folder_id.return_value = "folder-from-outlet"
+        body = {"chat_id": "chat-xyz", "messages": []}
+
+        with (
+            patch.object(mod, "Chats", mock_chats),
+            patch("asyncio.create_task") as mock_create_task,
+        ):
+            result = await filter_plugin.outlet(body, __user__={"id": "user-1"})
+
+        assert result == body
+        mock_chats.get_chat_folder_id.assert_called_once_with("chat-xyz", "user-1")
+        mock_create_task.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_outlet_forwards_user_id_to_resolve_folder(self, filter_plugin: Any) -> None:
+        """Verify outlet passes the resolved user id into _resolve_folder (and None by default)."""
+        filter_plugin.valves.AUTO_LEARN_MEMORIES = True
+        body = {"chat_id": "chat-abc"}
+
+        # With __user__ the id is forwarded.
+        with patch.object(
+            filter_plugin, "_resolve_folder", new=AsyncMock(return_value=None)
+        ) as mock_resolve:
+            await filter_plugin.outlet(body, __user__={"id": "user-42"})
+        mock_resolve.assert_called_once_with(body, "user-42")
+
+        # Backward compatibility: without __user__ the resolver gets None.
+        with patch.object(
+            filter_plugin, "_resolve_folder", new=AsyncMock(return_value=None)
+        ) as mock_resolve:
+            await filter_plugin.outlet(body)
+        mock_resolve.assert_called_once_with(body, None)
+
+    @pytest.mark.asyncio
+    async def test_outlet_no_user_id_skips_chats_lookup(self, filter_plugin: Any) -> None:
+        """Verify auto-learning does not resolve via Chats when __user__ has no id."""
+        filter_plugin.valves.AUTO_LEARN_MEMORIES = True
+        mock_chats = MagicMock()
+        body = {"chat_id": "chat-xyz", "messages": []}
+
+        with (
+            patch.object(mod, "Chats", mock_chats),
+            patch("asyncio.create_task") as mock_create_task,
+        ):
+            result = await filter_plugin.outlet(body, __user__={})
+
+        assert result == body
+        mock_chats.get_chat_folder_id.assert_not_called()
         mock_create_task.assert_not_called()
 
     @pytest.mark.asyncio
