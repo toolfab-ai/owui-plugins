@@ -25,14 +25,24 @@ class FilterMixin:
     async def _resolve_folder(
         self, body: Dict[str, Any], user_id: Optional[str] = None
     ) -> Optional[str]:
-        """Resolve the active folder_id: prefer the payload, fall back to the Chats model."""
-        # 1. Modern OWUI passes folder_id directly in the filter payload.
-        folder_id: Optional[str] = body.get("folder_id")
+        """Resolve the active folder_id: prefer the payload metadata, fall back to the Chats model.
+
+        OWUI's ``/api/chat/completions`` handler pops ``folder_id`` and ``chat_id`` out of the
+        top-level form_data and re-injects them into ``body["metadata"]`` (keys
+        ``metadata.folder_id``, ``metadata.chat_id``, ``metadata.user_id``). The top-level
+        ``body.get("folder_id")`` / ``body.get("chat_id")`` are therefore always None inside
+        ``inlet``. We read from ``metadata`` first, then fall back to any legacy top-level
+        keys for older OWUI versions, and finally try the Chats model.
+        """
+        metadata: Dict[str, Any] = body.get("metadata") or {}
+
+        # 1. Modern OWUI carries folder_id inside the payload metadata.
+        folder_id: Optional[str] = metadata.get("folder_id") or body.get("folder_id")
         if folder_id:
             return folder_id
 
         # 2. Legacy fallback through the Chats model.
-        chat_id: Optional[str] = body.get("chat_id")
+        chat_id: Optional[str] = metadata.get("chat_id") or body.get("chat_id")
         if not chat_id or Chats is None or not user_id:
             return None
         try:

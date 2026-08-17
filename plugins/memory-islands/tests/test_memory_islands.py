@@ -1,8 +1,10 @@
 """Unit tests for Memory Islands filter plugin — no container needed."""
 
+import builtins
 import json
 import logging
 import sqlite3
+import types
 from pathlib import Path
 from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -29,6 +31,52 @@ def filter_plugin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     _plugin = mod.Filter()
     yield _plugin
+
+
+# ========================================================================
+# DATA DIR RESOLUTION
+# ========================================================================
+
+
+@pytest.mark.unit
+class TestDataDirResolution:
+    """Tests for the ``_resolve_data_dir`` helper."""
+
+    def test_resolve_data_dir_honours_explicit_env_var(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify an explicitly set DATA_DIR env var wins over every other source."""
+        monkeypatch.setenv("DATA_DIR", "/custom/data")
+        assert mod._resolve_data_dir() == Path("/custom/data")
+
+    def test_resolve_data_dir_falls_back_to_home_when_import_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify fallback to ~/.openwebui when DATA_DIR is unset and open_webui import fails."""
+        monkeypatch.delenv("DATA_DIR", raising=False)
+        real_import = builtins.__import__
+
+        def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name == "open_webui.env":
+                raise ImportError("open_webui not available")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        assert mod._resolve_data_dir() == Path.home() / ".openwebui"
+
+    def test_resolve_data_dir_uses_framework_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify framework-resolved open_webui.env.DATA_DIR is used when env var is unset."""
+        monkeypatch.delenv("DATA_DIR", raising=False)
+        fake_env = types.SimpleNamespace(DATA_DIR="/fake/owui/data")
+        real_import = builtins.__import__
+
+        def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name == "open_webui.env":
+                return fake_env
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        assert mod._resolve_data_dir() == Path("/fake/owui/data")
 
 
 # ========================================================================
@@ -96,28 +144,89 @@ class TestDatabaseInitialization:
 
 @pytest.mark.unit
 class TestFolderResolution:
-    """Tests for resolving folder ID from the filter payload or the Chats model."""
+    """Tests for resolving folder ID from the filter payload or the Chats model.
 
-    async def test_resolve_folder_success(self, filter_plugin: Any) -> None:
-        """Verify folder_id is resolved directly from the payload without touching sqlite."""
-        body = {"folder_id": "test-folder-123", "chat_id": "chat-xyz"}
+    IMPORTANT: These tests use the REAL Open WebUI payload shape. OWUI's
+    ``/api/chat/completions`` handler pops ``folder_id`` and ``chat_id`` out of the
+    top-level form_data and re-injects them into ``body["metadata"]`` (keys
+    ``metadata.folder_id``, ``metadata.chat_id``, ``metadata.user_id``). Therefore a
+    filter's ``inlet(body, __user__)`` never sees top-level ``folder_id``/``chat_id`` —
+    they are None. All payloads below reflect that reality.
+    """
+
+    async def test_resolve_folder_from_metadata_folder_id(self, filter_plugin: Any) -> None:
+        """Verify folder_id is read from ``body["metadata"]["folder_id"]`` when present.
+
+        Regression: before the fix the plugin only looked at the (always None) top-level
+        ``body.get("folder_id")``, so a chat inside a folder was treated as Global Workspace.
+        """
+        body = {
+            "metadata": {
+                "user_id": "user-1",
+                "chat_id": "chat-xyz",
+                "folder_id": "test-folder-123",
+            },
+            "messages": [],
+        }
         folder_id = await filter_plugin._resolve_folder(body)
         assert folder_id == "test-folder-123"
 
-    async def test_resolve_folder_via_chats_model(self, filter_plugin: Any) -> None:
-        """Verify legacy fallback resolves folder_id through the Chats model."""
+    async def test_resolve_folder_prefers_metadata_folder_id_over_top_level(
+        self, filter_plugin: Any
+    ) -> None:
+        """Verify metadata.folder_id wins even if a legacy top-level key is present."""
+        body = {
+            "folder_id": "top-level-folder",
+            "metadata": {"chat_id": "chat-xyz", "folder_id": "metadata-folder"},
+        }
+        folder_id = await filter_plugin._resolve_folder(body)
+        assert folder_id == "metadata-folder"
+
+    async def test_resolve_folder_metadata_folder_id_empty_falls_back_to_chats(
+        self, filter_plugin: Any
+    ) -> None:
+        """Verify an empty metadata.folder_id triggers the Chats-model fallback."""
         mock_chats = MagicMock()
         mock_chats.get_chat_folder_id.return_value = "folder-from-chats"
         with patch.object(mod, "Chats", mock_chats):
-            body = {"chat_id": "chat-xyz"}
+            body = {
+                "metadata": {"user_id": "user-1", "chat_id": "chat-xyz", "folder_id": ""},
+            }
             folder_id = await filter_plugin._resolve_folder(body, user_id="user-1")
 
         assert folder_id == "folder-from-chats"
         mock_chats.get_chat_folder_id.assert_called_once_with("chat-xyz", "user-1")
 
-    async def test_resolve_folder_no_chat_found(self, filter_plugin: Any) -> None:
-        """Verify _resolve_folder returns None if no folder_id or chat_id is available."""
+    async def test_resolve_folder_via_chats_model_using_metadata_chat_id(
+        self, filter_plugin: Any
+    ) -> None:
+        """Verify the Chats-model fallback uses ``body["metadata"]["chat_id"]``.
+
+        Regression: before the fix the plugin read ``body.get("chat_id")`` which is None in
+        the real payload (OWUI pops it into metadata), so the fallback never ran.
+        """
+        mock_chats = MagicMock()
+        mock_chats.get_chat_folder_id.return_value = "folder-from-chats"
+        with patch.object(mod, "Chats", mock_chats):
+            body = {
+                "metadata": {"user_id": "user-1", "chat_id": "chat-xyz", "folder_id": None},
+            }
+            folder_id = await filter_plugin._resolve_folder(body, user_id="user-1")
+
+        assert folder_id == "folder-from-chats"
+        mock_chats.get_chat_folder_id.assert_called_once_with("chat-xyz", "user-1")
+
+    async def test_resolve_folder_no_metadata_returns_none(self, filter_plugin: Any) -> None:
+        """Verify _resolve_folder returns None when no metadata/chat/folder info exists."""
         body = {"messages": []}
+        folder_id = await filter_plugin._resolve_folder(body, user_id="user-1")
+        assert folder_id is None
+
+    async def test_resolve_folder_global_workspace_returns_none(self, filter_plugin: Any) -> None:
+        """Global-workspace chat: metadata present but folder_id and chat_id empty -> None."""
+        body = {
+            "metadata": {"user_id": "user-1", "chat_id": "", "folder_id": None},
+        }
         folder_id = await filter_plugin._resolve_folder(body, user_id="user-1")
         assert folder_id is None
 
@@ -132,7 +241,9 @@ class TestFolderResolution:
             patch.object(mod, "Chats", mock_chats),
             caplog.at_level(logging.ERROR),
         ):
-            body = {"chat_id": "chat-xyz"}
+            body = {
+                "metadata": {"user_id": "user-1", "chat_id": "chat-xyz", "folder_id": None},
+            }
             folder_id = await filter_plugin._resolve_folder(body, user_id="user-1")
 
         assert folder_id is None
@@ -201,7 +312,7 @@ class TestInletGating:
     async def test_inlet_success_injects_prompt(self, filter_plugin: Any) -> None:
         """Verify active folder guidelines and facts are successfully prepended as system message."""
         body = {
-            "chat_id": "chat-abc",
+            "metadata": {"user_id": "user-1", "chat_id": "chat-abc", "folder_id": "folder-abc"},
             "messages": [{"role": "user", "content": "Explain photosynthesis."}],
         }
 
@@ -233,7 +344,7 @@ class TestInletGating:
     async def test_inlet_no_folder_and_isolate_by_default(self, filter_plugin: Any) -> None:
         """Verify no modification happens if no folder is resolved and ISOLATE_BY_DEFAULT is active."""
         body = {
-            "chat_id": "chat-abc",
+            "metadata": {"user_id": "user-1", "chat_id": "chat-abc", "folder_id": None},
             "messages": [{"role": "user", "content": "Hello"}],
         }
         filter_plugin.valves.ISOLATE_BY_DEFAULT = True
@@ -250,7 +361,7 @@ class TestInletGating:
     ) -> None:
         """Verify that any unhandled exception in inlet is logged and returns unmodified body."""
         body = {
-            "chat_id": "chat-abc",
+            "metadata": {"user_id": "user-1", "chat_id": "chat-abc", "folder_id": None},
             "messages": [{"role": "user", "content": "Hello"}],
         }
 
@@ -461,9 +572,13 @@ class TestSlashCommands:
 
     @pytest.mark.asyncio
     async def test_command_outside_folder_redirects_and_informs(self, filter_plugin: Any) -> None:
-        """Verify executing a command outside a folder redirects role to system and informs about Global Workspace."""
+        """Verify executing a command outside a folder redirects role to system and informs about Global Workspace.
+
+        Uses the realistic OWUI payload: no top-level chat_id/folder_id; the chat lives in
+        the Global Workspace so metadata.folder_id is None and _resolve_folder returns None.
+        """
         body = {
-            "chat_id": "chat-outside",
+            "metadata": {"user_id": "user-1", "chat_id": "chat-outside", "folder_id": None},
             "messages": [{"role": "user", "content": "/island-help"}],
         }
 
@@ -477,10 +592,48 @@ class TestSlashCommands:
         assert "Global Workspace" in messages[-1]["content"]
 
     @pytest.mark.asyncio
+    async def test_command_in_folder_not_treated_as_global_workspace(
+        self, filter_plugin: Any
+    ) -> None:
+        """REGRESSION: a chat inside a folder must NOT be treated as Global Workspace.
+
+        The bug: OWUI pops folder_id/chat_id into body["metadata"]; the plugin read the
+        top-level keys which are always None, so _resolve_folder returned None even for a
+        chat inside a folder, wrongly triggering the "outside folder" guidance. This test
+        asserts that with metadata.folder_id present, the command handler runs the
+        folder-specific logic instead.
+        """
+        body = {
+            "metadata": {
+                "user_id": "user-1",
+                "chat_id": "chat-inside",
+                "folder_id": "project-alpha-folder",
+            },
+            "messages": [
+                {"role": "user", "content": "/island-guidelines Be extremely professional."}
+            ],
+        }
+
+        with patch.object(
+            filter_plugin, "_resolve_folder", new=AsyncMock(return_value="project-alpha-folder")
+        ):
+            result = await filter_plugin.inlet(body)
+
+        messages = result["messages"]
+        assert len(messages) == 1
+        assert messages[-1]["role"] == "system"
+        # Must NOT contain the "outside folder" guidance
+        assert "outside of any folder" not in messages[-1]["content"]
+        assert "Global Workspace" not in messages[-1]["content"]
+        # Folder-specific handling happened instead
+        assert "updated the folder guidelines" in messages[-1]["content"]
+        assert "Be extremely professional." in messages[-1]["content"]
+
+    @pytest.mark.asyncio
     async def test_help_inside_folder(self, filter_plugin: Any) -> None:
         """Verify /island-help inside a folder returns the detailed markdown system instruction helper message."""
         body = {
-            "chat_id": "chat-inside",
+            "metadata": {"user_id": "user-1", "chat_id": "chat-inside", "folder_id": "folder-123"},
             "messages": [{"role": "user", "content": "/island-help"}],
         }
 
@@ -502,7 +655,7 @@ class TestSlashCommands:
     ) -> None:
         """Verify /island-guidelines with an argument updates guidelines and sets confirmation."""
         body = {
-            "chat_id": "chat-inside",
+            "metadata": {"user_id": "user-1", "chat_id": "chat-inside", "folder_id": "folder-123"},
             "messages": [
                 {"role": "user", "content": "/island-guidelines Be extremely professional."}
             ],
@@ -533,7 +686,7 @@ class TestSlashCommands:
     async def test_guidelines_without_argument_prompts_usage(self, filter_plugin: Any) -> None:
         """Verify /island-guidelines without an argument prompts for usage."""
         body = {
-            "chat_id": "chat-inside",
+            "metadata": {"user_id": "user-1", "chat_id": "chat-inside", "folder_id": "folder-123"},
             "messages": [{"role": "user", "content": "/island-guidelines"}],
         }
 
@@ -561,7 +714,7 @@ class TestSlashCommands:
         conn.close()
 
         body = {
-            "chat_id": "chat-inside",
+            "metadata": {"user_id": "user-1", "chat_id": "chat-inside", "folder_id": "folder-123"},
             "messages": [{"role": "user", "content": "/island-status"}],
         }
 
@@ -590,7 +743,7 @@ class TestSlashCommands:
         conn.close()
 
         body = {
-            "chat_id": "chat-inside",
+            "metadata": {"user_id": "user-1", "chat_id": "chat-inside", "folder_id": "folder-123"},
             "messages": [{"role": "user", "content": "/island-clear-facts"}],
         }
 
@@ -627,7 +780,7 @@ class TestSlashCommands:
         conn.close()
 
         body = {
-            "chat_id": "chat-inside",
+            "metadata": {"user_id": "user-1", "chat_id": "chat-inside", "folder_id": "folder-123"},
             "messages": [{"role": "user", "content": "/island-clear-guidelines"}],
         }
 
@@ -654,7 +807,7 @@ class TestSlashCommands:
     async def test_unknown_command_returns_polite_error(self, filter_plugin: Any) -> None:
         """Verify unknown commands return polite error suggesting /island-help."""
         body = {
-            "chat_id": "chat-inside",
+            "metadata": {"user_id": "user-1", "chat_id": "chat-inside", "folder_id": "folder-123"},
             "messages": [{"role": "user", "content": "/island-foo"}],
         }
 
