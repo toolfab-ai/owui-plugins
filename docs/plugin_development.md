@@ -121,3 +121,10 @@ def _resolve_base_url(self, __request__=None) -> str:
     # 3. Environment Fallback
     return os.environ.get("WEBUI_URL", "http://localhost:3000").rstrip("/")
 ```
+
+### 9. LLM Calls & Error Handling
+
+Plugins that call an LLM (background fact extraction, summarization, title-style
+generation, synthesis, etc.) must follow the consolidated error-handling pattern in
+[LLM Calls & Error Handling Guide](llm_and_error_handling.md). The goal is graceful
+degradation: an LLM failure must never block the chat pipeline or crash the plugin.
