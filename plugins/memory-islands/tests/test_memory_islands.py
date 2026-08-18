@@ -7,7 +7,7 @@ import sqlite3
 import sys
 import types
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -635,6 +635,264 @@ class TestInletGating:
         assert not any(
             "Memory Island context injected" in record.message for record in caplog.records
         )
+
+
+# ========================================================================
+# PANEL-COMMAND CHANNEL (FR-011)
+# ========================================================================
+
+
+class TestPanelCommandChannel:
+    """Tests for the internal panel-command channel handled in the inlet.
+
+    The Memory Islands Manager Action panel posts ``@memory add:`` /
+    ``@memory delete:`` commands into the chat; the Filter inlet intercepts the
+    LAST user message, executes the DB operation for the resolved folder, and
+    rewrites the message into a system instruction so the assistant replies with
+    a concise confirmation. Malformed or outside-folder commands are rewritten
+    into a polite explanation with no DB write; normal messages pass through.
+    """
+
+    def _body(self, content: str, folder_id: Optional[str] = "folder-abc") -> Dict[str, Any]:
+        """Build a realistic inlet payload with a single user message."""
+        return {
+            "metadata": {"user_id": "user-1", "chat_id": "chat-abc", "folder_id": folder_id},
+            "messages": [{"role": "user", "content": content}],
+        }
+
+    # ------------------------------------------------------------------
+    # Command parsing
+    # ------------------------------------------------------------------
+
+    def test_parse_panel_command_normal_message(self, filter_plugin: Any) -> None:
+        """Verify a normal message yields None from the parser (untouched)."""
+        assert filter_plugin._parse_panel_command("Explain photosynthesis.") is None
+
+    def test_parse_panel_command_add(self, filter_plugin: Any) -> None:
+        """Verify '@memory add: <fact>' parses to ('add', payload)."""
+        assert filter_plugin._parse_panel_command("@memory add: User likes hiking") == (
+            "add",
+            "User likes hiking",
+        )
+
+    def test_parse_panel_command_delete(self, filter_plugin: Any) -> None:
+        """Verify '@memory delete: <fact>' parses to ('delete', payload)."""
+        assert filter_plugin._parse_panel_command("@memory delete: User likes hiking") == (
+            "delete",
+            "User likes hiking",
+        )
+
+    def test_parse_panel_command_prefix_case_insensitive(self, filter_plugin: Any) -> None:
+        """Verify the '@memory' prefix and action are matched case-insensitively."""
+        assert filter_plugin._parse_panel_command("@MEMORY ADD: fact") == ("add", "fact")
+        assert filter_plugin._parse_panel_command("@Memory DeLeTe: fact") == ("delete", "fact")
+
+    def test_parse_panel_command_whitespace_is_trimmed(self, filter_plugin: Any) -> None:
+        """Verify surrounding whitespace is trimmed from command and payload."""
+        assert filter_plugin._parse_panel_command("  @memory add:  fact  ") == ("add", "fact")
+
+    def test_parse_panel_command_malformed_variants(self, filter_plugin: Any) -> None:
+        """Verify malformed '@memory' variants return ('invalid', '')."""
+        assert filter_plugin._parse_panel_command("@memory") == ("invalid", "")
+        assert filter_plugin._parse_panel_command("@memory add") == ("invalid", "")
+        assert filter_plugin._parse_panel_command("@memory add:") == ("invalid", "")
+        assert filter_plugin._parse_panel_command("@memory delete:   ") == ("invalid", "")
+        assert filter_plugin._parse_panel_command("@memory wat: thing") == ("invalid", "")
+        assert filter_plugin._parse_panel_command("@memory : thing") == ("invalid", "")
+
+    def test_last_user_message_returns_last_only(self, filter_plugin: Any) -> None:
+        """Verify _last_user_message returns the final user message only."""
+        messages = [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "reply"},
+            {"role": "user", "content": "second"},
+        ]
+        last = filter_plugin._last_user_message(messages)
+        assert last == {"role": "user", "content": "second"}
+
+    # ------------------------------------------------------------------
+    # Add / delete through the inlet
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_add_command_stores_fact(self, filter_plugin: Any) -> None:
+        """Verify '@memory add: <fact>' stores the fact and rewrites a confirmation."""
+        body = self._body("@memory add: User likes hiking")
+        with patch.object(
+            filter_plugin, "_resolve_folder", new=AsyncMock(return_value="folder-abc")
+        ):
+            result = await filter_plugin.inlet(body)
+
+        assert filter_plugin._load_folder_data("folder-abc") == ["User likes hiking"]
+        last = result["messages"][-1]
+        assert last["role"] == "system"
+        assert last["content"] == "Reply with exactly: ✅ Fact added: User likes hiking"
+
+    @pytest.mark.asyncio
+    async def test_delete_command_removes_exact_fact(self, filter_plugin: Any) -> None:
+        """Verify '@memory delete: <fact>' removes the exact fact and rewrites a confirmation."""
+        filter_plugin._add_fact("folder-abc", "User likes hiking")
+        filter_plugin._add_fact("folder-abc", "User likes coffee")
+        body = self._body("@memory delete: User likes hiking")
+        with patch.object(
+            filter_plugin, "_resolve_folder", new=AsyncMock(return_value="folder-abc")
+        ):
+            result = await filter_plugin.inlet(body)
+
+        assert filter_plugin._load_folder_data("folder-abc") == ["User likes coffee"]
+        last = result["messages"][-1]
+        assert last["role"] == "system"
+        assert last["content"] == "Reply with exactly: ✅ Fact deleted: User likes hiking"
+
+    @pytest.mark.asyncio
+    async def test_add_command_logs_folder_id(
+        self, filter_plugin: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Verify panel-command execution is logged with the folder id (observability)."""
+        body = self._body("@memory add: User likes hiking")
+        with (
+            patch.object(
+                filter_plugin, "_resolve_folder", new=AsyncMock(return_value="folder-abc")
+            ),
+            caplog.at_level(logging.INFO),
+        ):
+            await filter_plugin.inlet(body)
+
+        assert any(
+            "Panel command executed: add fact for folder folder-abc" in record.message
+            for record in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_add_command_prefix_is_case_insensitive(self, filter_plugin: Any) -> None:
+        """Verify an uppercased '@memory' prefix still executes the command."""
+        body = self._body("@MEMORY ADD: User likes hiking")
+        with patch.object(
+            filter_plugin, "_resolve_folder", new=AsyncMock(return_value="folder-abc")
+        ):
+            result = await filter_plugin.inlet(body)
+
+        assert filter_plugin._load_folder_data("folder-abc") == ["User likes hiking"]
+        assert "✅ Fact added: User likes hiking" in result["messages"][-1]["content"]
+
+    @pytest.mark.asyncio
+    async def test_command_matching_uses_last_user_message_only(self, filter_plugin: Any) -> None:
+        """Verify only the LAST user message is matched for panel commands."""
+        body = {
+            "metadata": {"user_id": "user-1", "chat_id": "chat-abc", "folder_id": "folder-abc"},
+            "messages": [
+                {"role": "user", "content": "@memory add: Older fact"},
+                {"role": "assistant", "content": "Noted!"},
+                {"role": "user", "content": "Continue please"},
+            ],
+        }
+        with (
+            patch.object(
+                filter_plugin, "_resolve_folder", new=AsyncMock(return_value="folder-abc")
+            ),
+            patch.object(filter_plugin, "_load_folder_data", return_value=[]),
+        ):
+            result = await filter_plugin.inlet(body)
+
+        # The earlier '@memory' message must not have been executed or rewritten.
+        assert filter_plugin._load_folder_data("folder-abc") == []
+        assert result["messages"] == [
+            {"role": "user", "content": "@memory add: Older fact"},
+            {"role": "assistant", "content": "Noted!"},
+            {"role": "user", "content": "Continue please"},
+        ]
+
+    # ------------------------------------------------------------------
+    # Malformed / outside-folder: explanation, no DB write
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_malformed_command_explains_and_no_db_write(
+        self, filter_plugin: Any, temp_db_path: Path
+    ) -> None:
+        """Verify a malformed '@memory' command produces an explanation and no DB write."""
+        body = self._body("@memory wat: nonsense")
+        with patch.object(
+            filter_plugin, "_resolve_folder", new=AsyncMock(return_value="folder-abc")
+        ):
+            result = await filter_plugin.inlet(body)
+
+        last = result["messages"][-1]
+        assert last["role"] == "system"
+        assert "not understood" in last["content"]
+        assert "no memory was changed" in last["content"]
+
+        conn = sqlite3.connect(temp_db_path)
+        row = conn.execute("SELECT * FROM memories WHERE folder_id=?", ("folder-abc",)).fetchone()
+        conn.close()
+        assert row is None
+
+    @pytest.mark.asyncio
+    async def test_add_command_empty_payload_is_malformed(self, filter_plugin: Any) -> None:
+        """Verify '@memory add:' with no payload is malformed (no DB write)."""
+        body = self._body("@memory add:")
+        with patch.object(
+            filter_plugin, "_resolve_folder", new=AsyncMock(return_value="folder-abc")
+        ):
+            result = await filter_plugin.inlet(body)
+
+        assert filter_plugin._load_folder_data("folder-abc") == []
+        assert "not understood" in result["messages"][-1]["content"]
+
+    @pytest.mark.asyncio
+    async def test_command_outside_folder_explains_and_no_write(self, filter_plugin: Any) -> None:
+        """Verify an '@memory' message outside a folder explains and never writes the DB."""
+        body = self._body("@memory add: User likes hiking", folder_id=None)
+        with patch.object(filter_plugin, "_resolve_folder", new=AsyncMock(return_value=None)):
+            result = await filter_plugin.inlet(body)
+
+        # ISOLATE_BY_DEFAULT is on, but the command channel still rewrites the message.
+        last = result["messages"][-1]
+        assert last["role"] == "system"
+        assert "inside a folder" in last["content"]
+        assert "no memory was changed" in last["content"]
+        assert not any(
+            "@memory add: User likes hiking" in str(msg.get("content"))
+            for msg in result["messages"]
+        )
+
+    # ------------------------------------------------------------------
+    # Normal messages pass through
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_normal_message_passes_through_untouched(self, filter_plugin: Any) -> None:
+        """Verify a message without the '@memory' prefix is untouched by the command channel."""
+        body = self._body("Explain photosynthesis.")
+        with (
+            patch.object(
+                filter_plugin, "_resolve_folder", new=AsyncMock(return_value="folder-abc")
+            ),
+            patch.object(filter_plugin, "_load_folder_data", return_value=[]),
+        ):
+            result = await filter_plugin.inlet(body)
+
+        assert result == body
+        assert result["messages"] == [{"role": "user", "content": "Explain photosynthesis."}]
+
+    @pytest.mark.asyncio
+    async def test_message_mentioning_memory_without_prefix_passes_through(
+        self, filter_plugin: Any
+    ) -> None:
+        """Verify '@memory' embedded in a normal sentence is not treated as a command."""
+        body = self._body("Tell me about the @memory system, please.")
+        with (
+            patch.object(
+                filter_plugin, "_resolve_folder", new=AsyncMock(return_value="folder-abc")
+            ),
+            patch.object(filter_plugin, "_load_folder_data", return_value=[]),
+        ):
+            result = await filter_plugin.inlet(body)
+
+        assert result == body
+        assert result["messages"] == [
+            {"role": "user", "content": "Tell me about the @memory system, please."}
+        ]
 
 
 # ========================================================================

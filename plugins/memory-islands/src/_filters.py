@@ -6,7 +6,7 @@ import json
 import logging
 import re
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,17 @@ _EXCHANGE_COUNTS: Dict[str, int] = {}
 _COUNTER_LOCK: threading.Lock = threading.Lock()
 
 _EXTRACTION_TIMEOUT_SECONDS: int = 60
+
+
+# ---------------------------------------------------------------------------
+# Internal panel-command channel (FR-011)
+# ---------------------------------------------------------------------------
+# The Memory Islands Manager Action panel posts commands into the chat via
+# ``parent.postMessage({type:'input:prompt:submit', data:{prompt:'<command>'}})``
+# and the inlet intercepts them here. This is an internal panel<->plugin
+# protocol, NOT a user-facing prefix feature. Only the LAST user message is
+# matched, and the ``@memory`` prefix match is case-insensitive.
+_PANEL_COMMAND_PREFIX: str = "@memory"
 
 
 def _should_extract(folder_id: str, interval: int) -> bool:
@@ -266,6 +277,99 @@ class FilterMixin:
             parts.append(f"- {fact}")
         return "\n".join(parts)
 
+    def _last_user_message(self, messages: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Return the LAST user message in the payload, or None when absent.
+
+        Panel commands are matched against the last user message only, so earlier
+        user messages and system injections never trigger the command channel.
+        """
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                return msg
+        return None
+
+    def _parse_panel_command(self, text: str) -> Optional[Tuple[str, str]]:
+        """Parse an internal panel command from message text.
+
+        Returns ``None`` for normal messages (no ``@memory`` prefix — untouched by
+        the command channel). Returns ``("add", payload)`` / ``("delete", payload)``
+        for well-formed commands, or ``("invalid", "")`` for malformed ``@memory``
+        messages. Matching is case-insensitive on the ``@memory`` prefix and both
+        ``add``/``delete`` require a non-empty payload after the colon.
+        """
+        stripped: str = text.strip()
+        if not stripped.lower().startswith(_PANEL_COMMAND_PREFIX):
+            return None
+        rest: str = stripped[len(_PANEL_COMMAND_PREFIX) :].strip()
+        if not rest or ":" not in rest:
+            return ("invalid", "")
+        action_part, payload_part = rest.split(":", 1)
+        action: str = action_part.strip().lower()
+        payload: str = payload_part.strip()
+        if action not in ("add", "delete") or not payload:
+            return ("invalid", "")
+        return (action, payload)
+
+    def _rewrite_last_user_message(self, message: Dict[str, Any], instruction: str) -> None:
+        """Rewrite an existing message dict into a system instruction in place.
+
+        Uses the same mechanism the inlet uses for injection: the message content
+        is set on a ``role: system`` message within the ``messages`` list, so the
+        assistant replies with the requested confirmation.
+        """
+        message["role"] = "system"
+        message["content"] = instruction
+
+    def _handle_panel_command(
+        self, messages: List[Dict[str, Any]], folder_id: Optional[str]
+    ) -> bool:
+        """Execute the internal panel-command channel on the last user message.
+
+        Returns True when the last user message was an internal ``@memory`` command
+        and its content was rewritten into a system instruction (a concise
+        confirmation or a polite explanation); returns False for normal messages so
+        the regular inlet flow continues untouched.
+        """
+        last_user: Optional[Dict[str, Any]] = self._last_user_message(messages)
+        if last_user is None:
+            return False
+        text: str = str(last_user.get("content") or "")
+        if not text.strip().lower().startswith(_PANEL_COMMAND_PREFIX):
+            return False
+
+        # Commands outside a folder never write the DB — rewrite into an explanation.
+        if not folder_id:
+            logger.warning("Panel command outside a folder; no DB write.")
+            self._rewrite_last_user_message(
+                last_user,
+                "Reply politely explaining that memory commands only work inside "
+                "a folder chat and that no memory was changed.",
+            )
+            return True
+
+        parsed: Optional[Tuple[str, str]] = self._parse_panel_command(text)
+        if parsed is None or parsed[0] == "invalid":
+            logger.warning("Malformed panel command ignored; no DB write.")
+            self._rewrite_last_user_message(
+                last_user,
+                "Reply politely explaining that the internal memory command was "
+                "not understood (expected '@memory add: <fact>' or '@memory "
+                "delete: <fact>') and that no memory was changed.",
+            )
+            return True
+
+        action, payload = parsed
+        if action == "add":
+            self._add_fact(folder_id, payload)
+            logger.info("Panel command executed: add fact for folder %s.", folder_id)
+            confirmation: str = f"✅ Fact added: {payload}"
+        else:
+            self._delete_fact(folder_id, payload)
+            logger.info("Panel command executed: delete fact for folder %s.", folder_id)
+            confirmation = f"✅ Fact deleted: {payload}"
+        self._rewrite_last_user_message(last_user, f"Reply with exactly: {confirmation}")
+        return True
+
     async def inlet(
         self,
         body: Dict[str, Any],
@@ -285,6 +389,13 @@ class FilterMixin:
 
             folder_id: Optional[str] = await self._resolve_folder(body, (__user__ or {}).get("id"))
             messages: List[Dict[str, Any]] = body.get("messages", [])
+
+            # Internal panel-command channel (FR-011): runs before the isolation
+            # early-return so malformed or outside-folder @memory commands are
+            # rewritten into a polite explanatory reply instead of reaching the
+            # model as raw commands.
+            if self._handle_panel_command(messages, folder_id):
+                return body
 
             # enforce isolation
             if not folder_id and self.valves.ISOLATE_BY_DEFAULT:
