@@ -66,6 +66,8 @@ class TestMemoryIslandsFilter:
         props = spec.get("properties", {})
         assert "ISOLATE_BY_DEFAULT" in props
         assert "AUTO_LEARN_MEMORIES" in props
+        assert "EXTRACTION_MODEL" in props
+        assert "EXTRACTION_INTERVAL" in props
         assert "ENABLE_UPDATE_NOTIFICATIONS" in props
         assert "CHECK_PREVIEW_RELEASES" in props
 

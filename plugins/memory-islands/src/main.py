@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from ._commands import CommandsMixin
 from ._database import DatabaseMixin
 from ._filters import FilterMixin
 from ._updates import UpdateMixin
 from ._valves import Valves
 
 
-class Filter(FilterMixin, CommandsMixin, DatabaseMixin, UpdateMixin):
+class Filter(FilterMixin, DatabaseMixin, UpdateMixin):
     """Filter — Implements Memory Islands folder-scoped context isolation."""
 
     Valves = Valves

@@ -4,6 +4,7 @@ import builtins
 import json
 import logging
 import sqlite3
+import sys
 import types
 from pathlib import Path
 from typing import Any, Dict
@@ -31,6 +32,33 @@ def filter_plugin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     _plugin = mod.Filter()
     yield _plugin
+
+
+@pytest.fixture(autouse=True)
+def _reset_extraction_counters() -> None:
+    """Reset the module-level EXTRACTION_INTERVAL counters before every test."""
+    mod._EXCHANGE_COUNTS.clear()
+    yield
+
+
+def _mock_chat_module(response_text: str = "") -> tuple[MagicMock, MagicMock]:
+    """Build a fake ``open_webui.utils.chat`` module for the resilient LLM import."""
+    mock_chat = MagicMock()
+    mock_gen = AsyncMock(return_value=response_text)
+    mock_chat.generate_chat_completion = mock_gen
+    return mock_chat, mock_gen
+
+
+def _patch_chat_import(mock_chat: MagicMock) -> None:
+    """Inject fake open_webui modules so the in-function LLM import resolves."""
+    return patch.dict(
+        sys.modules,
+        {
+            "open_webui": MagicMock(),
+            "open_webui.utils": MagicMock(),
+            "open_webui.utils.chat": mock_chat,
+        },
+    )
 
 
 # ========================================================================
@@ -91,7 +119,7 @@ class TestDatabaseInitialization:
     def test_init_databases_creates_schema(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Verify that initializing the filter plugin creates the memories table with the correct schema."""
+        """Verify that initializing the filter plugin creates the v2 memories table."""
         monkeypatch.setenv("DATA_DIR", str(tmp_path))
         _plugin = mod.Filter()
         temp_db = tmp_path / "memory-islands" / "folder_memories.db"
@@ -107,13 +135,44 @@ class TestDatabaseInitialization:
         # Schema columns: (cid, name, type, notnull, dflt_value, pk)
         assert len(columns) == 3
         col_names = [col[1] for col in columns]
-        assert "folder_id" in col_names
-        assert "guidelines" in col_names
-        assert "facts" in col_names
+        assert col_names == ["folder_id", "facts", "updated_at"]
 
         # Verify primary key is folder_id
         folder_id_col = [col for col in columns if col[1] == "folder_id"][0]
         assert folder_id_col[5] == 1  # 1 denotes PRIMARY KEY
+
+    def test_init_databases_drops_legacy_v1_table(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Verify a legacy v1 table with a guidelines column is dropped and recreated as v2."""
+        monkeypatch.setenv("DATA_DIR", str(tmp_path))
+        temp_db = tmp_path / "memory-islands" / "folder_memories.db"
+        temp_db.parent.mkdir(parents=True, exist_ok=True)
+
+        # Simulate a legacy v1 database with a guidelines column and data.
+        conn = sqlite3.connect(temp_db)
+        conn.execute(
+            "CREATE TABLE memories (folder_id TEXT PRIMARY KEY, guidelines TEXT, facts TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO memories (folder_id, guidelines, facts) VALUES (?, ?, ?)",
+            ("folder-legacy", "Old guidelines", json.dumps(["Old fact"])),
+        )
+        conn.commit()
+        conn.close()
+
+        with caplog.at_level(logging.INFO):
+            _plugin = mod.Filter()
+
+        conn = sqlite3.connect(temp_db)
+        cursor = conn.execute("PRAGMA table_info(memories)")
+        col_names = [col[1] for col in cursor.fetchall()]
+        rows = conn.execute("SELECT * FROM memories").fetchall()
+        conn.close()
+
+        assert col_names == ["folder_id", "facts", "updated_at"]
+        assert rows == []  # legacy data is not carried over
+        assert any("legacy v1 memories table" in record.message for record in caplog.records)
 
     def test_init_databases_handles_sqlite_error(
         self,
@@ -294,30 +353,28 @@ class TestFolderResolution:
 
 
 class TestDataLoading:
-    """Tests loading folder guidelines and facts from local database."""
+    """Tests loading folder facts from the local database (schema v2)."""
 
     def test_load_folder_data_existing(self, filter_plugin: Any, temp_db_path: Path) -> None:
-        """Verify loading existing guidelines and facts successfully."""
+        """Verify loading existing facts successfully."""
         conn = sqlite3.connect(temp_db_path)
         conn.execute(
-            "INSERT INTO memories (folder_id, guidelines, facts) VALUES (?, ?, ?)",
+            "INSERT INTO memories (folder_id, facts, updated_at) VALUES (?, ?, ?)",
             (
                 "folder-abc",
-                "Be professional.",
                 json.dumps(["User is a doctor", "User works in NYC"]),
+                "2026-08-18T00:00:00+00:00",
             ),
         )
         conn.commit()
         conn.close()
 
-        guidelines, facts = filter_plugin._load_folder_data("folder-abc")
-        assert guidelines == "Be professional."
+        facts = filter_plugin._load_folder_data("folder-abc")
         assert facts == ["User is a doctor", "User works in NYC"]
 
     def test_load_folder_data_missing_record(self, filter_plugin: Any) -> None:
-        """Verify _load_folder_data returns defaults if no record exists for folder_id."""
-        guidelines, facts = filter_plugin._load_folder_data("non-existent-folder")
-        assert guidelines == ""
+        """Verify _load_folder_data returns [] if no record exists for folder_id."""
+        facts = filter_plugin._load_folder_data("non-existent-folder")
         assert facts == []
 
     def test_load_folder_data_db_error(
@@ -328,11 +385,95 @@ class TestDataLoading:
             patch("sqlite3.connect", side_effect=sqlite3.Error("Disk full")),
             caplog.at_level(logging.ERROR),
         ):
-            guidelines, facts = filter_plugin._load_folder_data("folder-abc")
+            facts = filter_plugin._load_folder_data("folder-abc")
 
-        assert guidelines == ""
         assert facts == []
         assert any("Failed to load folder memories" in record.message for record in caplog.records)
+
+
+# ========================================================================
+# FACT CRUD HELPERS
+# ========================================================================
+
+
+class TestFactCrud:
+    """Tests for _merge_and_store_facts, _add_fact, and _delete_fact."""
+
+    def test_merge_and_store_facts_dedup_preserves_order(
+        self, filter_plugin: Any, temp_db_path: Path
+    ) -> None:
+        """Verify merging deduplicates while preserving insertion order."""
+        filter_plugin._merge_and_store_facts("folder-merge", ["a", "b", "a", "c", "b"])
+        facts = filter_plugin._load_folder_data("folder-merge")
+        assert facts == ["a", "b", "c"]
+
+    def test_merge_and_store_facts_appends_to_existing(
+        self, filter_plugin: Any, temp_db_path: Path
+    ) -> None:
+        """Verify merging appends new facts to already stored ones."""
+        filter_plugin._merge_and_store_facts("folder-merge", ["existing"])
+        filter_plugin._merge_and_store_facts("folder-merge", ["new", "existing"])
+        facts = filter_plugin._load_folder_data("folder-merge")
+        assert facts == ["existing", "new"]
+
+    def test_merge_and_store_facts_caps_at_200(self, filter_plugin: Any) -> None:
+        """Verify the merged fact list is capped at 200 entries."""
+        filter_plugin._merge_and_store_facts("folder-cap", [f"fact-{i}" for i in range(205)])
+        facts = filter_plugin._load_folder_data("folder-cap")
+        assert len(facts) == 200
+        assert facts[0] == "fact-0"
+        assert facts[-1] == "fact-199"
+
+    def test_add_fact_trims_and_stores(self, filter_plugin: Any) -> None:
+        """Verify _add_fact trims whitespace and returns the new list."""
+        result = filter_plugin._add_fact("folder-add", "  User likes hiking  ")
+        assert result == ["User likes hiking"]
+
+    def test_add_fact_rejects_empty(self, filter_plugin: Any, temp_db_path: Path) -> None:
+        """Verify empty/whitespace facts are rejected without writes."""
+        result = filter_plugin._add_fact("folder-add", "   ")
+        assert result == []
+        conn = sqlite3.connect(temp_db_path)
+        row = conn.execute("SELECT * FROM memories WHERE folder_id=?", ("folder-add",)).fetchone()
+        conn.close()
+        assert row is None
+
+    def test_add_fact_dedups(self, filter_plugin: Any) -> None:
+        """Verify adding a duplicate fact does not create a second entry."""
+        filter_plugin._add_fact("folder-add", "same fact")
+        result = filter_plugin._add_fact("folder-add", "same fact")
+        assert result == ["same fact"]
+
+    def test_add_fact_caps_at_200(self, filter_plugin: Any) -> None:
+        """Verify _add_fact caps the stored list at 200 entries."""
+        for i in range(205):
+            filter_plugin._add_fact("folder-cap", f"fact-{i}")
+        facts = filter_plugin._load_folder_data("folder-cap")
+        assert len(facts) == 200
+
+    def test_delete_fact_removes_exact_match(self, filter_plugin: Any) -> None:
+        """Verify _delete_fact removes the exact matching fact."""
+        filter_plugin._add_fact("folder-del", "fact one")
+        filter_plugin._add_fact("folder-del", "fact two")
+        result = filter_plugin._delete_fact("folder-del", "fact one")
+        assert result == ["fact two"]
+
+    def test_delete_fact_no_match_returns_unchanged(self, filter_plugin: Any) -> None:
+        """Verify deleting a non-existent fact leaves the list unchanged."""
+        filter_plugin._add_fact("folder-del", "fact one")
+        result = filter_plugin._delete_fact("folder-del", "missing")
+        assert result == ["fact one"]
+
+    def test_updated_at_is_set_on_persist(self, filter_plugin: Any, temp_db_path: Path) -> None:
+        """Verify writes set an ISO 8601 updated_at timestamp."""
+        filter_plugin._add_fact("folder-ts", "fact")
+        conn = sqlite3.connect(temp_db_path)
+        row = conn.execute(
+            "SELECT updated_at FROM memories WHERE folder_id=?", ("folder-ts",)
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row[0] != ""
 
 
 # ========================================================================
@@ -341,11 +482,11 @@ class TestDataLoading:
 
 
 class TestInletGating:
-    """Tests injecting folder guidelines/memories as system prompt at inlet."""
+    """Tests injecting folder facts as a system prompt at inlet (facts only, no guidelines)."""
 
     @pytest.mark.asyncio
-    async def test_inlet_success_injects_prompt(self, filter_plugin: Any) -> None:
-        """Verify active folder guidelines and facts are successfully prepended as system message."""
+    async def test_inlet_injects_facts_only(self, filter_plugin: Any) -> None:
+        """Verify stored facts are prepended as a [Memory Island Active] system message."""
         body = {
             "metadata": {"user_id": "user-1", "chat_id": "chat-abc", "folder_id": "folder-abc"},
             "messages": [{"role": "user", "content": "Explain photosynthesis."}],
@@ -358,7 +499,7 @@ class TestInletGating:
             patch.object(
                 filter_plugin,
                 "_load_folder_data",
-                return_value=("Be extremely detailed.", ["User is 8 years old", "Likes science"]),
+                return_value=["User is 8 years old", "Likes science"],
             ),
         ):
             result = await filter_plugin.inlet(body)
@@ -369,11 +510,31 @@ class TestInletGating:
 
         content = messages[0]["content"]
         assert "[Memory Island Active]" in content
-        assert "Be extremely detailed." in content
         assert "- User is 8 years old" in content
         assert "- Likes science" in content
+        # No guidelines are injected in v0.2.0.
+        assert "guidelines" not in content.lower()
 
         assert messages[1] == {"role": "user", "content": "Explain photosynthesis."}
+
+    @pytest.mark.asyncio
+    async def test_inlet_no_injection_when_no_facts(self, filter_plugin: Any) -> None:
+        """Verify inlet returns the body unmodified when the folder has no facts."""
+        body = {
+            "metadata": {"user_id": "user-1", "chat_id": "chat-abc", "folder_id": "folder-abc"},
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+
+        with (
+            patch.object(
+                filter_plugin, "_resolve_folder", new=AsyncMock(return_value="folder-abc")
+            ),
+            patch.object(filter_plugin, "_load_folder_data", return_value=[]),
+        ):
+            result = await filter_plugin.inlet(body)
+
+        assert result == body
+        assert len(result["messages"]) == 1
 
     @pytest.mark.asyncio
     async def test_inlet_no_folder_and_isolate_by_default(self, filter_plugin: Any) -> None:
@@ -413,14 +574,321 @@ class TestInletGating:
         assert result == body
         assert any("Error in Memory Islands inlet" in record.message for record in caplog.records)
 
+    @pytest.mark.asyncio
+    async def test_inlet_logs_info_when_context_injected(
+        self, filter_plugin: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Verify an INFO log records the injected context banner, facts, and folder id."""
+        body = {
+            "metadata": {"user_id": "user-1", "chat_id": "chat-abc", "folder_id": "folder-abc"},
+            "messages": [{"role": "user", "content": "Explain photosynthesis."}],
+        }
+
+        with (
+            patch.object(
+                filter_plugin, "_resolve_folder", new=AsyncMock(return_value="folder-abc")
+            ),
+            patch.object(
+                filter_plugin,
+                "_load_folder_data",
+                return_value=["User prefers concise answers"],
+            ),
+            caplog.at_level(logging.INFO),
+        ):
+            result = await filter_plugin.inlet(body)
+
+        # Sanity check: context was actually injected into the payload.
+        assert result["messages"][0]["role"] == "system"
+
+        injection_records = [
+            record
+            for record in caplog.records
+            if "Memory Island context injected" in record.message
+        ]
+        assert len(injection_records) == 1
+        assert injection_records[0].levelno == logging.INFO
+        message = injection_records[0].message
+        assert "folder-abc" in message
+        assert "[Memory Island Active]\n- User prefers concise answers" in message
+
+    @pytest.mark.asyncio
+    async def test_inlet_no_folder_data_emits_no_info_log(
+        self, filter_plugin: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Verify no INFO injection log is emitted when the folder has no facts."""
+        body = {
+            "metadata": {"user_id": "user-1", "chat_id": "chat-abc", "folder_id": "folder-abc"},
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+
+        with (
+            patch.object(
+                filter_plugin, "_resolve_folder", new=AsyncMock(return_value="folder-abc")
+            ),
+            patch.object(filter_plugin, "_load_folder_data", return_value=[]),
+            caplog.at_level(logging.INFO),
+        ):
+            result = await filter_plugin.inlet(body)
+
+        assert result == body
+        assert len(result["messages"]) == 1
+        assert not any(
+            "Memory Island context injected" in record.message for record in caplog.records
+        )
+
 
 # ========================================================================
-# OUTLET AND MEMORY LEARNING
+# EXTRACTION PARSING
 # ========================================================================
 
 
-class TestMemoryLearning:
-    """Tests the extraction and learning of memories from assistant replies."""
+class TestExtractionParsing:
+    """Tests for the strict ``_parse_extraction_response`` contract."""
+
+    def test_parse_valid_json_array(self, filter_plugin: Any) -> None:
+        """Verify a plain JSON array of strings parses to facts."""
+        result = filter_plugin._parse_extraction_response('["User likes tea", "Lives in Berlin"]')
+        assert result == ["User likes tea", "Lives in Berlin"]
+
+    def test_parse_json_fence(self, filter_plugin: Any) -> None:
+        """Verify ```json code fences are stripped before parsing."""
+        result = filter_plugin._parse_extraction_response('```json\n["User likes tea"]\n```')
+        assert result == ["User likes tea"]
+
+    def test_parse_partial_json_around_prose(self, filter_plugin: Any) -> None:
+        """Verify JSON wrapped in prose is still recovered from the array block."""
+        result = filter_plugin._parse_extraction_response('Here are the facts: ["User likes tea"]')
+        assert result == ["User likes tea"]
+
+    def test_parse_none_returns_no_facts(self, filter_plugin: Any) -> None:
+        """Verify <NONE> yields no facts."""
+        assert filter_plugin._parse_extraction_response("<NONE>") == []
+        assert filter_plugin._parse_extraction_response("<none>") == []
+
+    def test_parse_invalid_json_returns_no_facts(
+        self, filter_plugin: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Verify invalid JSON yields no facts and logs a warning."""
+        with caplog.at_level(logging.WARNING):
+            result = filter_plugin._parse_extraction_response("not json at all")
+        assert result == []
+        assert any("Failed to parse JSON" in record.message for record in caplog.records)
+
+    def test_parse_rejects_non_string_entries(self, filter_plugin: Any) -> None:
+        """Verify non-string entries are discarded, keeping only strings."""
+        result = filter_plugin._parse_extraction_response('["ok", 42, {"bad": 1}, null, "also"]')
+        assert result == ["ok", "also"]
+
+    def test_parse_non_array_object_returns_no_facts(self, filter_plugin: Any) -> None:
+        """Verify a JSON object (not an array) yields no facts."""
+        result = filter_plugin._parse_extraction_response('{"fact": "User likes tea"}')
+        assert result == []
+
+
+# ========================================================================
+# LLM FACT EXTRACTION
+# ========================================================================
+
+
+class TestLLMFactExtraction:
+    """Tests for the background ``_extract_facts_with_llm`` task."""
+
+    def _body(self) -> Dict[str, Any]:
+        return {
+            "model": "chat-model",
+            "messages": [
+                {"role": "user", "content": "I love hiking."},
+                {"role": "assistant", "content": "Noted!"},
+            ],
+        }
+
+    @pytest.mark.asyncio
+    async def test_extract_valid_json_stores_facts(self, filter_plugin: Any) -> None:
+        """Verify valid JSON output is parsed and stored via _merge_and_store_facts."""
+        mock_chat, mock_gen = _mock_chat_module('["User loves hiking", "User prefers trails"]')
+        with (
+            _patch_chat_import(mock_chat),
+            patch.object(filter_plugin, "_merge_and_store_facts") as mock_merge,
+        ):
+            await filter_plugin._extract_facts_with_llm("folder-abc", self._body(), "user-1", None)
+
+        mock_merge.assert_called_once_with(
+            "folder-abc", ["User loves hiking", "User prefers trails"]
+        )
+        # The payload must use the chat's model and the documented settings.
+        payload = mock_gen.call_args[0][1]
+        assert payload["model"] == "chat-model"
+        assert payload["temperature"] == 0.2
+        assert payload["stream"] is False
+
+    @pytest.mark.asyncio
+    async def test_extract_json_fence_stores_facts(self, filter_plugin: Any) -> None:
+        """Verify a ```json fence response is still parsed and stored."""
+        mock_chat, _ = _mock_chat_module('```json\n["Fenced fact"]\n```')
+        with (
+            _patch_chat_import(mock_chat),
+            patch.object(filter_plugin, "_merge_and_store_facts") as mock_merge,
+        ):
+            await filter_plugin._extract_facts_with_llm("folder-abc", self._body(), "user-1", None)
+        mock_merge.assert_called_once_with("folder-abc", ["Fenced fact"])
+
+    @pytest.mark.asyncio
+    async def test_extract_none_stores_nothing(self, filter_plugin: Any) -> None:
+        """Verify <NONE> yields no facts and no merge call."""
+        mock_chat, _ = _mock_chat_module("<NONE>")
+        with (
+            _patch_chat_import(mock_chat),
+            patch.object(filter_plugin, "_merge_and_store_facts") as mock_merge,
+        ):
+            await filter_plugin._extract_facts_with_llm("folder-abc", self._body(), "user-1", None)
+        mock_merge.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_extract_invalid_json_stores_nothing(
+        self, filter_plugin: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Verify invalid JSON is logged and nothing is stored."""
+        mock_chat, _ = _mock_chat_module("this is not json")
+        with (
+            _patch_chat_import(mock_chat),
+            patch.object(filter_plugin, "_merge_and_store_facts") as mock_merge,
+            caplog.at_level(logging.WARNING),
+        ):
+            await filter_plugin._extract_facts_with_llm("folder-abc", self._body(), "user-1", None)
+        mock_merge.assert_not_called()
+        assert any("Failed to parse JSON" in record.message for record in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_extract_rejects_non_string_entries(self, filter_plugin: Any) -> None:
+        """Verify non-string entries in the array are discarded before storage."""
+        mock_chat, _ = _mock_chat_module('["good", 42, {"bad": 1}, "also good"]')
+        with (
+            _patch_chat_import(mock_chat),
+            patch.object(filter_plugin, "_merge_and_store_facts") as mock_merge,
+        ):
+            await filter_plugin._extract_facts_with_llm("folder-abc", self._body(), "user-1", None)
+        mock_merge.assert_called_once_with("folder-abc", ["good", "also good"])
+
+    @pytest.mark.asyncio
+    async def test_extract_uses_explicit_extraction_model(self, filter_plugin: Any) -> None:
+        """Verify EXTRACTION_MODEL overrides the chat's model in the LLM payload."""
+        filter_plugin.valves.EXTRACTION_MODEL = "extraction-model"
+        mock_chat, mock_gen = _mock_chat_module('["Fact"]')
+        with (
+            _patch_chat_import(mock_chat),
+            patch.object(filter_plugin, "_merge_and_store_facts") as mock_merge,
+        ):
+            await filter_plugin._extract_facts_with_llm("folder-abc", self._body(), "user-1", None)
+        payload = mock_gen.call_args[0][1]
+        assert payload["model"] == "extraction-model"
+        mock_merge.assert_called_once_with("folder-abc", ["Fact"])
+
+    @pytest.mark.asyncio
+    async def test_extract_generation_failure_handled(
+        self, filter_plugin: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Verify an LLM failure is logged via logger.exception and nothing is stored."""
+        mock_chat = MagicMock()
+        mock_chat.generate_chat_completion = AsyncMock(side_effect=RuntimeError("boom"))
+        with (
+            _patch_chat_import(mock_chat),
+            patch.object(filter_plugin, "_merge_and_store_facts") as mock_merge,
+            caplog.at_level(logging.ERROR),
+        ):
+            await filter_plugin._extract_facts_with_llm("folder-abc", self._body(), "user-1", None)
+        mock_merge.assert_not_called()
+        assert any(
+            "LLM generation failed during fact extraction" in record.message
+            for record in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_extract_import_failure_skips(
+        self, filter_plugin: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Verify a missing generate_chat_completion import skips extraction gracefully."""
+        with (
+            patch.object(filter_plugin, "_merge_and_store_facts") as mock_merge,
+            caplog.at_level(logging.WARNING),
+        ):
+            # No open_webui mocks injected: both import attempts fail.
+            await filter_plugin._extract_facts_with_llm("folder-abc", self._body(), "user-1", None)
+        mock_merge.assert_not_called()
+        assert any("generate_chat_completion" in record.message for record in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_resolve_user_obj_uses_users_model(self, filter_plugin: Any) -> None:
+        """Verify user object resolution uses Users.get_user_by_id with dynamic await."""
+        mock_users = MagicMock()
+        mock_users.get_user_by_id.return_value = {"id": "user-1"}
+        with patch.object(mod, "Users", mock_users):
+            user_obj = await filter_plugin._resolve_user_obj("user-1")
+        assert user_obj == {"id": "user-1"}
+        mock_users.get_user_by_id.assert_called_once_with("user-1")
+
+    @pytest.mark.asyncio
+    async def test_resolve_user_obj_awaits_async_users(self, filter_plugin: Any) -> None:
+        """Verify an async Users.get_user_by_id is awaited dynamically."""
+        mock_users = MagicMock()
+        mock_users.get_user_by_id = AsyncMock(return_value={"id": "user-1"})
+        with patch.object(mod, "Users", mock_users):
+            user_obj = await filter_plugin._resolve_user_obj("user-1")
+        assert user_obj == {"id": "user-1"}
+
+
+# ========================================================================
+# MODEL RESOLUTION
+# ========================================================================
+
+
+class TestExtractionModelResolution:
+    """Tests for the EXTRACTION_MODEL fallback chain."""
+
+    def test_explicit_model_wins(self, filter_plugin: Any) -> None:
+        """Verify EXTRACTION_MODEL is preferred when set."""
+        filter_plugin.valves.EXTRACTION_MODEL = "extraction-model"
+        body: Dict[str, Any] = {"model": "chat-model"}
+        assert filter_plugin._resolve_extraction_model(body) == "extraction-model"
+
+    def test_empty_model_falls_back_to_chat_model(self, filter_plugin: Any) -> None:
+        """Verify an empty EXTRACTION_MODEL falls back to the chat's model id."""
+        filter_plugin.valves.EXTRACTION_MODEL = ""
+        body: Dict[str, Any] = {"model": "chat-model"}
+        assert filter_plugin._resolve_extraction_model(body) == "chat-model"
+
+    def test_missing_chat_model_returns_empty(self, filter_plugin: Any) -> None:
+        """Verify no model anywhere resolves to an empty string (skips extraction)."""
+        filter_plugin.valves.EXTRACTION_MODEL = ""
+        body: Dict[str, Any] = {}
+        assert filter_plugin._resolve_extraction_model(body) == ""
+
+
+# ========================================================================
+# EXTRACTION INTERVAL GATING
+# ========================================================================
+
+
+class TestExtractionIntervalGating:
+    """Tests for the EXTRACTION_INTERVAL throttle and outlet scheduling."""
+
+    def test_should_extract_default_interval(self) -> None:
+        """Verify interval=1 schedules extraction on every exchange."""
+        assert mod._should_extract("folder-a", 1) is True
+        assert mod._should_extract("folder-a", 1) is True
+        assert mod._should_extract("folder-a", 1) is True
+
+    def test_should_extract_every_n(self) -> None:
+        """Verify interval=N schedules extraction only every Nth exchange (M mod N == 0)."""
+        assert mod._should_extract("folder-b", 3) is False
+        assert mod._should_extract("folder-b", 3) is False
+        assert mod._should_extract("folder-b", 3) is True
+        assert mod._should_extract("folder-b", 3) is False
+
+    def test_should_extract_isolation_per_folder(self) -> None:
+        """Verify counters are keyed per folder."""
+        assert mod._should_extract("folder-x", 2) is False
+        assert mod._should_extract("folder-x", 2) is True  # 2 % 2 == 0
+        assert mod._should_extract("folder-y", 2) is False  # unaffected by folder-x
 
     @pytest.mark.asyncio
     async def test_outlet_disabled_auto_learn(self, filter_plugin: Any) -> None:
@@ -473,6 +941,8 @@ class TestMemoryLearning:
         assert result == body
         mock_chats.get_chat_folder_id.assert_called_once_with("chat-xyz", "user-1")
         mock_create_task.assert_called_once()
+        coro = mock_create_task.call_args[0][0]
+        coro.close()
 
     @pytest.mark.asyncio
     async def test_outlet_forwards_user_id_to_resolve_folder(self, filter_plugin: Any) -> None:
@@ -512,8 +982,8 @@ class TestMemoryLearning:
         mock_create_task.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_outlet_schedules_async_learning(self, filter_plugin: Any) -> None:
-        """Verify outlet correctly schedules memory extraction task asynchronously."""
+    async def test_outlet_schedules_async_extraction(self, filter_plugin: Any) -> None:
+        """Verify outlet schedules the LLM extraction task asynchronously."""
         filter_plugin.valves.AUTO_LEARN_MEMORIES = True
         body = {"chat_id": "chat-abc"}
 
@@ -528,393 +998,36 @@ class TestMemoryLearning:
         assert result == body
         mock_create_task.assert_called_once()
         coro = mock_create_task.call_args[0][0]
-        assert coro.__name__ == "_learn_memories"
+        assert coro.__name__ == "_extract_facts_with_llm"
         # Close coroutine explicitly to avoid "coroutine was never awaited" python warning
         coro.close()
 
     @pytest.mark.asyncio
-    async def test_learn_memories_empty_messages(
-        self, filter_plugin: Any, temp_db_path: Path
-    ) -> None:
-        """Verify _learn_memories handles empty message bodies without DB side-effects."""
-        body: Dict[str, Any] = {"messages": []}
-        await filter_plugin._learn_memories("folder-abc", body)
-
-        conn = sqlite3.connect(temp_db_path)
-        row = conn.execute("SELECT * FROM memories").fetchone()
-        conn.close()
-        assert row is None
-
-    @pytest.mark.asyncio
-    async def test_learn_memories_no_learnable_statements(
-        self, filter_plugin: Any, temp_db_path: Path
-    ) -> None:
-        """Verify assistant replies containing no statements starting with 'I ' or 'The user' are ignored."""
-        body = {
-            "messages": [
-                {"role": "user", "content": "Tell me a joke."},
-                {
-                    "role": "assistant",
-                    "content": "Why did the chicken cross the road?\nTo get to the other side!",
-                },
-            ]
-        }
-        await filter_plugin._learn_memories("folder-abc", body)
-
-        conn = sqlite3.connect(temp_db_path)
-        row = conn.execute("SELECT * FROM memories").fetchone()
-        conn.close()
-        assert row is None
-
-    @pytest.mark.asyncio
-    async def test_learn_memories_creates_new_facts_in_db(
-        self, filter_plugin: Any, temp_db_path: Path
-    ) -> None:
-        """Verify learnable facts are extracted from assistant response and stored in a new folder memory record."""
-        body = {
-            "messages": [
-                {"role": "user", "content": "My thoughts on cooking?"},
-                {
-                    "role": "assistant",
-                    "content": "I noticed you like cooking Italian.\nThe user prefers olive oil.\nWait, actually I think you prefer basil too.",
-                },
-            ]
-        }
-        await filter_plugin._learn_memories("folder-abc", body)
-
-        conn = sqlite3.connect(temp_db_path)
-        row = conn.execute(
-            "SELECT guidelines, facts FROM memories WHERE folder_id=?", ("folder-abc",)
-        ).fetchone()
-        conn.close()
-
-        assert row is not None
-        assert row[0] == ""  # Guidelines default to empty string
-        facts = json.loads(row[1])
-        assert facts == [
-            "I noticed you like cooking Italian.",
-            "The user prefers olive oil.",
-        ]
-
-    @pytest.mark.asyncio
-    async def test_learn_memories_appends_to_existing_facts(
-        self, filter_plugin: Any, temp_db_path: Path
-    ) -> None:
-        """Verify new facts are appended to already existing facts in the folder's memories."""
-        # Insert pre-existing guidelines and facts
-        conn = sqlite3.connect(temp_db_path)
-        conn.execute(
-            "INSERT INTO memories (folder_id, guidelines, facts) VALUES (?, ?, ?)",
-            ("folder-abc", "Be polite.", json.dumps(["I know you love tennis."])),
-        )
-        conn.commit()
-        conn.close()
-
-        body = {
-            "messages": [
-                {"role": "user", "content": "I also like badminton."},
-                {
-                    "role": "assistant",
-                    "content": "The user mentioned loving badminton.\nI will keep that in mind.",
-                },
-            ]
-        }
-        await filter_plugin._learn_memories("folder-abc", body)
-
-        conn = sqlite3.connect(temp_db_path)
-        row = conn.execute(
-            "SELECT guidelines, facts FROM memories WHERE folder_id=?", ("folder-abc",)
-        ).fetchone()
-        conn.close()
-
-        assert row is not None
-        # Guidelines are preserved when appending new facts
-        assert row[0] == "Be polite."
-        facts = json.loads(row[1])
-        assert facts == [
-            "I know you love tennis.",
-            "The user mentioned loving badminton.",
-            "I will keep that in mind.",
-        ]
-
-    @pytest.mark.asyncio
-    async def test_learn_memories_db_exception_handled(
-        self, filter_plugin: Any, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """Verify that any exceptions thrown during memory persistence are handled and logged."""
-        body = {
-            "messages": [
-                {"role": "user", "content": "Hi"},
-                {"role": "assistant", "content": "I like books."},
-            ]
-        }
+    async def test_outlet_respects_extraction_interval(self, filter_plugin: Any) -> None:
+        """Verify extraction is scheduled only when the interval allows it."""
+        filter_plugin.valves.AUTO_LEARN_MEMORIES = True
+        filter_plugin.valves.EXTRACTION_INTERVAL = 3
+        body = {"chat_id": "chat-abc"}
 
         with (
-            patch("sqlite3.connect", side_effect=sqlite3.Error("Connection lost")),
-            caplog.at_level(logging.ERROR),
+            patch.object(
+                filter_plugin, "_resolve_folder", new=AsyncMock(return_value="folder-abc")
+            ),
+            patch("asyncio.create_task") as mock_create_task,
         ):
-            # This should not raise an exception to the caller
-            await filter_plugin._learn_memories("folder-abc", body)
+            # Exchange 1 of 3 (1 mod 3 != 0) -> skip
+            await filter_plugin.outlet(body)
+            assert mock_create_task.call_count == 0
 
-        assert any("Failed to store folder memories" in record.message for record in caplog.records)
+            # Exchange 2 of 3 (2 mod 3 != 0) -> skip
+            await filter_plugin.outlet(body)
+            assert mock_create_task.call_count == 0
 
+            # Exchange 3 of 3 (3 mod 3 == 0) -> schedule
+            await filter_plugin.outlet(body)
+            assert mock_create_task.call_count == 1
 
-# ========================================================================
-# SLASH COMMANDS
-# ========================================================================
-
-
-class TestSlashCommands:
-    """Tests for Memory Islands /island- slash commands handled inside inlet."""
-
-    @pytest.mark.asyncio
-    async def test_command_outside_folder_redirects_and_informs(self, filter_plugin: Any) -> None:
-        """Verify executing a command outside a folder redirects role to system and informs about Global Workspace.
-
-        Uses the realistic OWUI payload: no top-level chat_id/folder_id; the chat lives in
-        the Global Workspace so metadata.folder_id is None and _resolve_folder returns None.
-        """
-        body = {
-            "metadata": {"user_id": "user-1", "chat_id": "chat-outside", "folder_id": None},
-            "messages": [{"role": "user", "content": "/island-help"}],
-        }
-
-        with patch.object(filter_plugin, "_resolve_folder", new=AsyncMock(return_value=None)):
-            result = await filter_plugin.inlet(body)
-
-        messages = result["messages"]
-        assert len(messages) == 1
-        assert messages[-1]["role"] == "system"
-        assert "outside of any folder" in messages[-1]["content"]
-        assert "Global Workspace" in messages[-1]["content"]
-
-    @pytest.mark.asyncio
-    async def test_command_in_folder_not_treated_as_global_workspace(
-        self, filter_plugin: Any
-    ) -> None:
-        """REGRESSION: a chat inside a folder must NOT be treated as Global Workspace.
-
-        The bug: OWUI pops folder_id/chat_id into body["metadata"]; the plugin read the
-        top-level keys which are always None, so _resolve_folder returned None even for a
-        chat inside a folder, wrongly triggering the "outside folder" guidance. This test
-        asserts that with metadata.folder_id present, the command handler runs the
-        folder-specific logic instead.
-        """
-        body = {
-            "metadata": {
-                "user_id": "user-1",
-                "chat_id": "chat-inside",
-                "folder_id": "project-alpha-folder",
-            },
-            "messages": [
-                {"role": "user", "content": "/island-guidelines Be extremely professional."}
-            ],
-        }
-
-        with patch.object(
-            filter_plugin, "_resolve_folder", new=AsyncMock(return_value="project-alpha-folder")
-        ):
-            result = await filter_plugin.inlet(body)
-
-        messages = result["messages"]
-        assert len(messages) == 1
-        assert messages[-1]["role"] == "system"
-        # Must NOT contain the "outside folder" guidance
-        assert "outside of any folder" not in messages[-1]["content"]
-        assert "Global Workspace" not in messages[-1]["content"]
-        # Folder-specific handling happened instead
-        assert "updated the folder guidelines" in messages[-1]["content"]
-        assert "Be extremely professional." in messages[-1]["content"]
-
-    @pytest.mark.asyncio
-    async def test_help_inside_folder(self, filter_plugin: Any) -> None:
-        """Verify /island-help inside a folder returns the detailed markdown system instruction helper message."""
-        body = {
-            "metadata": {"user_id": "user-1", "chat_id": "chat-inside", "folder_id": "folder-123"},
-            "messages": [{"role": "user", "content": "/island-help"}],
-        }
-
-        with patch.object(
-            filter_plugin, "_resolve_folder", new=AsyncMock(return_value="folder-123")
-        ):
-            result = await filter_plugin.inlet(body)
-
-        messages = result["messages"]
-        assert len(messages) == 1
-        assert messages[-1]["role"] == "system"
-        assert "requested help" in messages[-1]["content"]
-        assert "beautifully formatted markdown guide" in messages[-1]["content"]
-        assert "`/island-guidelines <text>`" in messages[-1]["content"]
-
-    @pytest.mark.asyncio
-    async def test_guidelines_with_argument_updates_and_confirms(
-        self, filter_plugin: Any, temp_db_path: Path
-    ) -> None:
-        """Verify /island-guidelines with an argument updates guidelines and sets confirmation."""
-        body = {
-            "metadata": {"user_id": "user-1", "chat_id": "chat-inside", "folder_id": "folder-123"},
-            "messages": [
-                {"role": "user", "content": "/island-guidelines Be extremely professional."}
-            ],
-        }
-
-        with patch.object(
-            filter_plugin, "_resolve_folder", new=AsyncMock(return_value="folder-123")
-        ):
-            result = await filter_plugin.inlet(body)
-
-        # Check return message
-        messages = result["messages"]
-        assert len(messages) == 1
-        assert messages[-1]["role"] == "system"
-        assert "updated the folder guidelines" in messages[-1]["content"]
-        assert "Be extremely professional." in messages[-1]["content"]
-
-        # Check DB
-        conn = sqlite3.connect(temp_db_path)
-        row = conn.execute(
-            "SELECT guidelines FROM memories WHERE folder_id=?", ("folder-123",)
-        ).fetchone()
-        conn.close()
-        assert row is not None
-        assert row[0] == "Be extremely professional."
-
-    @pytest.mark.asyncio
-    async def test_guidelines_without_argument_prompts_usage(self, filter_plugin: Any) -> None:
-        """Verify /island-guidelines without an argument prompts for usage."""
-        body = {
-            "metadata": {"user_id": "user-1", "chat_id": "chat-inside", "folder_id": "folder-123"},
-            "messages": [{"role": "user", "content": "/island-guidelines"}],
-        }
-
-        with patch.object(
-            filter_plugin, "_resolve_folder", new=AsyncMock(return_value="folder-123")
-        ):
-            result = await filter_plugin.inlet(body)
-
-        messages = result["messages"]
-        assert len(messages) == 1
-        assert messages[-1]["role"] == "system"
-        assert "without providing any rules text" in messages[-1]["content"]
-        assert "politely explain how to use it" in messages[-1]["content"]
-
-    @pytest.mark.asyncio
-    async def test_status_inside_folder(self, filter_plugin: Any, temp_db_path: Path) -> None:
-        """Verify /island-status inside a folder returns current guidelines and learned facts."""
-        # Insert guidelines and facts
-        conn = sqlite3.connect(temp_db_path)
-        conn.execute(
-            "INSERT INTO memories (folder_id, guidelines, facts) VALUES (?, ?, ?)",
-            ("folder-123", "Write code carefully.", json.dumps(["Likes Python", "Hates Java"])),
-        )
-        conn.commit()
-        conn.close()
-
-        body = {
-            "metadata": {"user_id": "user-1", "chat_id": "chat-inside", "folder_id": "folder-123"},
-            "messages": [{"role": "user", "content": "/island-status"}],
-        }
-
-        with patch.object(
-            filter_plugin, "_resolve_folder", new=AsyncMock(return_value="folder-123")
-        ):
-            result = await filter_plugin.inlet(body)
-
-        messages = result["messages"]
-        assert len(messages) == 1
-        assert messages[-1]["role"] == "system"
-        assert "status of the current folder's" in messages[-1]["content"]
-        assert "Write code carefully." in messages[-1]["content"]
-        assert "- Likes Python" in messages[-1]["content"]
-        assert "- Hates Java" in messages[-1]["content"]
-
-    @pytest.mark.asyncio
-    async def test_clear_facts_resets_facts(self, filter_plugin: Any, temp_db_path: Path) -> None:
-        """Verify /island-clear-facts calls _clear_facts and resets facts to '[]'."""
-        conn = sqlite3.connect(temp_db_path)
-        conn.execute(
-            "INSERT INTO memories (folder_id, guidelines, facts) VALUES (?, ?, ?)",
-            ("folder-123", "Write code carefully.", json.dumps(["Likes Python"])),
-        )
-        conn.commit()
-        conn.close()
-
-        body = {
-            "metadata": {"user_id": "user-1", "chat_id": "chat-inside", "folder_id": "folder-123"},
-            "messages": [{"role": "user", "content": "/island-clear-facts"}],
-        }
-
-        with patch.object(
-            filter_plugin, "_resolve_folder", new=AsyncMock(return_value="folder-123")
-        ):
-            result = await filter_plugin.inlet(body)
-
-        messages = result["messages"]
-        assert len(messages) == 1
-        assert messages[-1]["role"] == "system"
-        assert "cleared all auto-learned facts/memories" in messages[-1]["content"]
-
-        conn = sqlite3.connect(temp_db_path)
-        row = conn.execute(
-            "SELECT guidelines, facts FROM memories WHERE folder_id=?", ("folder-123",)
-        ).fetchone()
-        conn.close()
-        assert row is not None
-        assert row[0] == "Write code carefully."
-        assert row[1] == "[]"
-
-    @pytest.mark.asyncio
-    async def test_clear_guidelines_resets_guidelines(
-        self, filter_plugin: Any, temp_db_path: Path
-    ) -> None:
-        """Verify /island-clear-guidelines calls _clear_guidelines and resets guidelines to ''."""
-        conn = sqlite3.connect(temp_db_path)
-        conn.execute(
-            "INSERT INTO memories (folder_id, guidelines, facts) VALUES (?, ?, ?)",
-            ("folder-123", "Write code carefully.", json.dumps(["Likes Python"])),
-        )
-        conn.commit()
-        conn.close()
-
-        body = {
-            "metadata": {"user_id": "user-1", "chat_id": "chat-inside", "folder_id": "folder-123"},
-            "messages": [{"role": "user", "content": "/island-clear-guidelines"}],
-        }
-
-        with patch.object(
-            filter_plugin, "_resolve_folder", new=AsyncMock(return_value="folder-123")
-        ):
-            result = await filter_plugin.inlet(body)
-
-        messages = result["messages"]
-        assert len(messages) == 1
-        assert messages[-1]["role"] == "system"
-        assert "cleared the custom folder guidelines" in messages[-1]["content"]
-
-        conn = sqlite3.connect(temp_db_path)
-        row = conn.execute(
-            "SELECT guidelines, facts FROM memories WHERE folder_id=?", ("folder-123",)
-        ).fetchone()
-        conn.close()
-        assert row is not None
-        assert row[0] == ""
-        assert json.loads(row[1]) == ["Likes Python"]
-
-    @pytest.mark.asyncio
-    async def test_unknown_command_returns_polite_error(self, filter_plugin: Any) -> None:
-        """Verify unknown commands return polite error suggesting /island-help."""
-        body = {
-            "metadata": {"user_id": "user-1", "chat_id": "chat-inside", "folder_id": "folder-123"},
-            "messages": [{"role": "user", "content": "/island-foo"}],
-        }
-
-        with patch.object(
-            filter_plugin, "_resolve_folder", new=AsyncMock(return_value="folder-123")
-        ):
-            result = await filter_plugin.inlet(body)
-
-        messages = result["messages"]
-        assert len(messages) == 1
-        assert messages[-1]["role"] == "system"
-        assert "unknown command: '/island-foo'" in messages[-1]["content"]
-        assert "suggest typing `/island-help`" in messages[-1]["content"]
+        for call in mock_create_task.call_args_list:
+            coro = call.args[0]
+            assert coro.__name__ == "_extract_facts_with_llm"
+            coro.close()

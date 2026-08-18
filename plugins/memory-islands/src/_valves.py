@@ -12,6 +12,16 @@ class Valves(BaseModel):
     AUTO_LEARN_MEMORIES: bool = Field(
         default=True, description="Automatically extract and save new memories from chats."
     )
+    EXTRACTION_MODEL: str = Field(
+        default="",
+        description="Model id used for background fact extraction. Leave empty to reuse the chat's model.",
+    )
+    EXTRACTION_INTERVAL: int = Field(
+        default=1,
+        ge=1,
+        le=50,
+        description="Analyze the chat for new facts every N exchanges.",
+    )
     ENABLE_UPDATE_NOTIFICATIONS: bool = Field(
         default=True, description="Enable background checking for plugin updates."
     )
