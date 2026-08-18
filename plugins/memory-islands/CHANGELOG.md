@@ -20,3 +20,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - Custom folder guidelines — use the native Open WebUI folder System Prompt instead.
 - All `/island-*` slash commands (`/island-help`, `/island-guidelines`, `/island-status`, `/island-clear-guidelines`, `/island-clear-facts`).
+
+### Fixed
+- Panel-command confirmations now reflect the real database outcome: a failed DB write produces a polite database-error reply instead of a false "added/deleted" success, and deleting a non-existent fact reports that nothing was deleted instead of claiming success.

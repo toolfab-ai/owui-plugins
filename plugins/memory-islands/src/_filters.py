@@ -329,6 +329,12 @@ class FilterMixin:
         and its content was rewritten into a system instruction (a concise
         confirmation or a polite explanation); returns False for normal messages so
         the regular inlet flow continues untouched.
+
+        The confirmation is based on the REAL database outcome reported by
+        ``_add_fact``/``_delete_fact``: successful adds/deletes produce the
+        ``✅`` confirmation, a failed write produces a database-error reply, and
+        a delete that matched no fact produces a ``nothing was deleted`` reply
+        instead of a false success.
         """
         last_user: Optional[Dict[str, Any]] = self._last_user_message(messages)
         if last_user is None:
@@ -360,14 +366,41 @@ class FilterMixin:
 
         action, payload = parsed
         if action == "add":
-            self._add_fact(folder_id, payload)
-            logger.info("Panel command executed: add fact for folder %s.", folder_id)
-            confirmation: str = f"✅ Fact added: {payload}"
+            _facts, saved, succeeded = self._add_fact(folder_id, payload)
+            if not saved:
+                logger.warning("Panel command add failed to persist for folder %s.", folder_id)
+                instruction = (
+                    "Reply with exactly: ⚠️ The memory could not be saved due to a "
+                    "database error. Please try again."
+                )
+            elif succeeded:
+                logger.info("Panel command executed: add fact for folder %s.", folder_id)
+                instruction = f"Reply with exactly: ✅ Fact added: {payload}"
+            else:
+                logger.warning(
+                    "Panel command add skipped for folder %s: memory is full.", folder_id
+                )
+                instruction = (
+                    "Reply with exactly: ℹ️ The fact could not be added because this "
+                    "folder's memory is full (200 facts)."
+                )
         else:
-            self._delete_fact(folder_id, payload)
-            logger.info("Panel command executed: delete fact for folder %s.", folder_id)
-            confirmation = f"✅ Fact deleted: {payload}"
-        self._rewrite_last_user_message(last_user, f"Reply with exactly: {confirmation}")
+            _facts, saved, succeeded = self._delete_fact(folder_id, payload)
+            if not saved:
+                logger.warning("Panel command delete failed to persist for folder %s.", folder_id)
+                instruction = (
+                    "Reply with exactly: ⚠️ The memory could not be saved due to a "
+                    "database error. Please try again."
+                )
+            elif succeeded:
+                logger.info("Panel command executed: delete fact for folder %s.", folder_id)
+                instruction = f"Reply with exactly: ✅ Fact deleted: {payload}"
+            else:
+                logger.info("Panel command delete matched no fact for folder %s.", folder_id)
+                instruction = (
+                    "Reply with exactly: ℹ️ No matching memory was found; nothing was deleted."
+                )
+        self._rewrite_last_user_message(last_user, instruction)
         return True
 
     async def inlet(

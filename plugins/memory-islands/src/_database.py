@@ -6,7 +6,7 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -99,8 +99,13 @@ class DatabaseMixin:
                 conn.close()
         return facts
 
-    def _persist_facts(self, folder_id: str, facts: List[str]) -> None:
-        """Upsert a folder's fact list and refresh its ``updated_at`` timestamp."""
+    def _persist_facts(self, folder_id: str, facts: List[str]) -> bool:
+        """Upsert a folder's fact list and refresh its ``updated_at`` timestamp.
+
+        Returns True when the write succeeded; False when a database error
+        occurred (logged via ``logger.exception`` and swallowed so the pipeline
+        degrades gracefully).
+        """
         conn: Optional[sqlite3.Connection] = None
         try:
             conn = sqlite3.connect(self._db_path, timeout=5)
@@ -109,8 +114,10 @@ class DatabaseMixin:
                 (folder_id, json.dumps(facts), _utc_now_iso()),
             )
             conn.commit()
+            return True
         except sqlite3.Error:
             logger.exception("Failed to store folder memories.")
+            return False
         finally:
             if conn is not None:
                 conn.close()
@@ -121,27 +128,39 @@ class DatabaseMixin:
         combined: List[str] = list(dict.fromkeys(existing_facts + new_facts))[: self._MAX_FACTS]
         self._persist_facts(folder_id, combined)
 
-    def _add_fact(self, folder_id: str, fact: str) -> List[str]:
+    def _add_fact(self, folder_id: str, fact: str) -> Tuple[List[str], bool, bool]:
         """Add a single fact: trim, reject empty, deduplicate, cap, persist.
 
-        Returns the new fact list.
+        Returns ``(facts, saved, succeeded)``:
+        - ``facts`` is the stored list after the attempt;
+        - ``saved`` is False only when the database write failed (logged, never
+          raised);
+        - ``succeeded`` is True when the fact is present in ``facts`` after the
+          call (appended or deduped-in-place) and the write succeeded; False for
+          a saturated (200-fact) folder where the cap prevents adding a new fact.
         """
         cleaned: str = fact.strip()
         if not cleaned:
-            return self._load_folder_data(folder_id)
+            return self._load_folder_data(folder_id), True, False
         existing_facts: List[str] = self._load_folder_data(folder_id)
         combined: List[str] = list(dict.fromkeys(existing_facts + [cleaned]))[: self._MAX_FACTS]
-        self._persist_facts(folder_id, combined)
-        return combined
+        saved: bool = self._persist_facts(folder_id, combined)
+        return combined, saved, saved and cleaned in combined
 
-    def _delete_fact(self, folder_id: str, fact: str) -> List[str]:
+    def _delete_fact(self, folder_id: str, fact: str) -> Tuple[List[str], bool, bool]:
         """Remove the exact matching fact, persist, and refresh ``updated_at``.
 
-        Returns the new fact list.
+        Returns ``(facts, saved, succeeded)``:
+        - ``facts`` is the stored list after the attempt;
+        - ``saved`` is False only when the database write failed (logged, never
+          raised);
+        - ``succeeded`` is True when the exact fact existed, was removed, and
+          the write succeeded; False when no exact match existed (nothing was
+          deleted).
         """
         existing_facts: List[str] = self._load_folder_data(folder_id)
         if fact not in existing_facts:
-            return existing_facts
+            return existing_facts, True, False
         combined: List[str] = [f for f in existing_facts if f != fact]
-        self._persist_facts(folder_id, combined)
-        return combined
+        saved: bool = self._persist_facts(folder_id, combined)
+        return combined, saved, saved and fact not in combined

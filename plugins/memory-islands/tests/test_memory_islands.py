@@ -425,44 +425,61 @@ class TestFactCrud:
         assert facts[-1] == "fact-199"
 
     def test_add_fact_trims_and_stores(self, filter_plugin: Any) -> None:
-        """Verify _add_fact trims whitespace and returns the new list."""
-        result = filter_plugin._add_fact("folder-add", "  User likes hiking  ")
-        assert result == ["User likes hiking"]
+        """Verify _add_fact trims whitespace, stores the fact, and reports success."""
+        facts, saved, succeeded = filter_plugin._add_fact("folder-add", "  User likes hiking  ")
+        assert facts == ["User likes hiking"]
+        assert saved is True
+        assert succeeded is True
 
     def test_add_fact_rejects_empty(self, filter_plugin: Any, temp_db_path: Path) -> None:
         """Verify empty/whitespace facts are rejected without writes."""
-        result = filter_plugin._add_fact("folder-add", "   ")
-        assert result == []
+        facts, saved, succeeded = filter_plugin._add_fact("folder-add", "   ")
+        assert facts == []
+        assert saved is True
+        assert succeeded is False
         conn = sqlite3.connect(temp_db_path)
         row = conn.execute("SELECT * FROM memories WHERE folder_id=?", ("folder-add",)).fetchone()
         conn.close()
         assert row is None
 
     def test_add_fact_dedups(self, filter_plugin: Any) -> None:
-        """Verify adding a duplicate fact does not create a second entry."""
+        """Verify adding a duplicate fact does not create a second entry but succeeds."""
         filter_plugin._add_fact("folder-add", "same fact")
-        result = filter_plugin._add_fact("folder-add", "same fact")
-        assert result == ["same fact"]
+        facts, saved, succeeded = filter_plugin._add_fact("folder-add", "same fact")
+        assert facts == ["same fact"]
+        assert saved is True
+        assert succeeded is True
 
     def test_add_fact_caps_at_200(self, filter_plugin: Any) -> None:
-        """Verify _add_fact caps the stored list at 200 entries."""
+        """Verify _add_fact caps the stored list at 200 entries and reports the cap."""
         for i in range(205):
             filter_plugin._add_fact("folder-cap", f"fact-{i}")
         facts = filter_plugin._load_folder_data("folder-cap")
         assert len(facts) == 200
+        assert facts[0] == "fact-0"
+        assert facts[-1] == "fact-199"
+        # A fact beyond the cap must NOT be reported as added (no false success).
+        facts_after, saved, succeeded = filter_plugin._add_fact("folder-cap", "fact-overflow")
+        assert saved is True
+        assert succeeded is False
+        assert facts_after == facts
 
     def test_delete_fact_removes_exact_match(self, filter_plugin: Any) -> None:
-        """Verify _delete_fact removes the exact matching fact."""
+        """Verify _delete_fact removes the exact matching fact and reports success."""
         filter_plugin._add_fact("folder-del", "fact one")
         filter_plugin._add_fact("folder-del", "fact two")
-        result = filter_plugin._delete_fact("folder-del", "fact one")
-        assert result == ["fact two"]
+        facts, saved, succeeded = filter_plugin._delete_fact("folder-del", "fact one")
+        assert facts == ["fact two"]
+        assert saved is True
+        assert succeeded is True
 
     def test_delete_fact_no_match_returns_unchanged(self, filter_plugin: Any) -> None:
-        """Verify deleting a non-existent fact leaves the list unchanged."""
+        """Verify deleting a non-existent fact leaves the list unchanged and reports no success."""
         filter_plugin._add_fact("folder-del", "fact one")
-        result = filter_plugin._delete_fact("folder-del", "missing")
-        assert result == ["fact one"]
+        facts, saved, succeeded = filter_plugin._delete_fact("folder-del", "missing")
+        assert facts == ["fact one"]
+        assert saved is True
+        assert succeeded is False
 
     def test_updated_at_is_set_on_persist(self, filter_plugin: Any, temp_db_path: Path) -> None:
         """Verify writes set an ISO 8601 updated_at timestamp."""
@@ -743,6 +760,70 @@ class TestPanelCommandChannel:
         last = result["messages"][-1]
         assert last["role"] == "system"
         assert last["content"] == "Reply with exactly: ✅ Fact deleted: User likes hiking"
+
+    @pytest.mark.asyncio
+    async def test_delete_command_no_match_reports_nothing_deleted(
+        self, filter_plugin: Any
+    ) -> None:
+        """Verify deleting a non-existent fact does NOT produce a success confirmation."""
+        filter_plugin._add_fact("folder-abc", "User likes hiking")
+        body = self._body("@memory delete: No such fact")
+        with patch.object(
+            filter_plugin, "_resolve_folder", new=AsyncMock(return_value="folder-abc")
+        ):
+            result = await filter_plugin.inlet(body)
+
+        last = result["messages"][-1]
+        assert last["role"] == "system"
+        assert last["content"] == (
+            "Reply with exactly: ℹ️ No matching memory was found; nothing was deleted."
+        )
+        assert "Fact deleted" not in last["content"]
+        # Stored facts must be untouched.
+        assert filter_plugin._load_folder_data("folder-abc") == ["User likes hiking"]
+
+    @pytest.mark.asyncio
+    async def test_add_command_db_error_reports_failure(self, filter_plugin: Any) -> None:
+        """Verify a DB write error produces a failure reply, not a false success."""
+        body = self._body("@memory add: User likes hiking")
+        with (
+            patch.object(
+                filter_plugin, "_resolve_folder", new=AsyncMock(return_value="folder-abc")
+            ),
+            patch("sqlite3.connect", side_effect=sqlite3.Error("Disk full")),
+        ):
+            result = await filter_plugin.inlet(body)
+
+        last = result["messages"][-1]
+        assert last["role"] == "system"
+        assert last["content"] == (
+            "Reply with exactly: ⚠️ The memory could not be saved due to a "
+            "database error. Please try again."
+        )
+        assert "Fact added" not in last["content"]
+
+    @pytest.mark.asyncio
+    async def test_delete_command_db_error_reports_failure(self, filter_plugin: Any) -> None:
+        """Verify a DB write failure on delete produces a failure reply, not a false success."""
+        filter_plugin._add_fact("folder-abc", "User likes hiking")
+        body = self._body("@memory delete: User likes hiking")
+        with (
+            patch.object(
+                filter_plugin, "_resolve_folder", new=AsyncMock(return_value="folder-abc")
+            ),
+            patch.object(filter_plugin, "_persist_facts", return_value=False),
+        ):
+            result = await filter_plugin.inlet(body)
+
+        last = result["messages"][-1]
+        assert last["role"] == "system"
+        assert last["content"] == (
+            "Reply with exactly: ⚠️ The memory could not be saved due to a "
+            "database error. Please try again."
+        )
+        assert "Fact deleted" not in last["content"]
+        # The stored fact must remain because the write failed.
+        assert filter_plugin._load_folder_data("folder-abc") == ["User likes hiking"]
 
     @pytest.mark.asyncio
     async def test_add_command_logs_folder_id(
