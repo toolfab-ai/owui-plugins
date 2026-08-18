@@ -50,7 +50,7 @@ This plugin does **not** define any User Valves. All behavior is configured glob
 ## Installation
 
 ### Via URL (Recommended)
-1. Navigate to the [Releases](https://github.com/open-webui/owui-plugins/releases) page.
+1. Navigate to the [Releases](https://github.com/toolfab-ai/owui-plugins/releases) page.
 2. Copy the URL of the `plugin.py` file from the latest release of this plugin.
 3. In Open WebUI, navigate to **Admin Settings** -> **Functions** (or **Tools**) -> **+ New Function** -> **Install from URL**.
 4. Paste the URL and click **Install**.
