@@ -30,6 +30,8 @@ class Filter(Updates):
     Open WebUI fetch_url tool to provide deep internal logging.
     """
 
+    _global_patched: bool = False
+
     def __init__(self) -> None:
         self.valves = Valves()
         self._patched: bool = False
@@ -81,6 +83,21 @@ class Filter(Updates):
         """
         Inlet hook to perform the monkey-patching of fetch_url.
         """
+        # Heartbeat to UI to confirm filter is running
+        if __event_emitter__:
+            try:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": "DEBUG: Fetch URL Debugger active - monitoring tool calls...",
+                            "done": False,
+                        },
+                    }
+                )
+            except Exception:
+                pass
+
         if __event_emitter__:
             update_msg = await self._get_update_notification(__user__)
             if update_msg:
@@ -97,195 +114,184 @@ class Filter(Updates):
         if self._patched:
             return body
 
-        # Use a class-level or module-level flag to ensure absolute single patching
-        # across instances if necessary, but instance-level is usually enough for a singleton Filter.
-        # However, to be safe against multiple Filter instances:
-        if getattr(Filter, "_global_patched", False):
+        if Filter._global_patched:
             self._patched = True
             return body
 
+        self._log_to_stderr("STARTING AGGRESSIVE PATCHING OF fetch_url...")
+
         try:
-            # Attempt to import the builtin tools module
-            builtin_tools = None
+            # 1. Targeted Patching of Known Modules
             for import_path in [
                 "open_webui.tools.builtin",
                 "open_webui.apps.webui.tools.builtin",
             ]:
                 try:
-                    builtin_tools = __import__(import_path, fromlist=["fetch_url"])
-                    if hasattr(builtin_tools, "fetch_url"):
-                        logger.info(f"Found fetch_url at {import_path}")
-                        break
+                    # Clear from sys.modules to ensure we get a fresh reference if it was partially loaded
+                    mod = __import__(import_path, fromlist=["fetch_url"])
+                    if hasattr(mod, "fetch_url"):
+                        self._apply_patch(mod, "fetch_url")
+                        self._log_to_stderr(f"Successfully patched {import_path}.fetch_url")
                 except ImportError:
                     continue
+                except Exception as e:
+                    self._log_to_stderr(f"Failed to patch {import_path}: {e}")
 
-            if not builtin_tools or not hasattr(builtin_tools, "fetch_url"):
+            # 2. Aggressive Global Search in sys.modules
+            # This handles cases where tools did 'from open_webui.tools.builtin import fetch_url'
+            # We look for ANY module that has a 'fetch_url' attribute.
+            modules_to_patch = []
+            for name, mod in list(sys.modules.items()):
+                if not mod:
+                    continue
+                if hasattr(mod, "fetch_url"):
+                    attr = getattr(mod, "fetch_url")
+                    # Check if it looks like the function we want to patch
+                    if (
+                        callable(attr)
+                        and hasattr(attr, "__name__")
+                        and attr.__name__ == "fetch_url"
+                    ):
+                        modules_to_patch.append((name, mod))
+
+            for name, mod in modules_to_patch:
+                try:
+                    self._apply_patch(mod, "fetch_url")
+                    self._log_to_stderr(f"Aggressively patched {name}.fetch_url")
+                except Exception as e:
+                    logger.debug(f"Failed aggressive patch on {name}: {e}")
+
+            self._patched = True
+            Filter._global_patched = True
+            self._log_to_stderr("COMPLETED AGGRESSIVE PATCHING.")
+
+        except Exception as e:
+            self._log_to_stderr(
+                f"ERROR: Unexpected error during aggressive patching: {str(e)}\n{traceback.format_exc()}"
+            )
+
+        return body
+
+    def _apply_patch(self, module: Any, attr_name: str) -> None:
+        """Helper to apply the wrapper to a specific module attribute."""
+        original = getattr(module, attr_name)
+
+        # Skip if already patched
+        if getattr(original, "__is_fetch_url_debugger__", False):
+            return
+
+        is_async = inspect.iscoroutinefunction(original)
+        wrapped = self._get_wrapper(original, is_async)
+        wrapped.__is_fetch_url_debugger__ = True
+        setattr(module, attr_name, wrapped)
+
+    def _get_wrapper(self, original: Callable, is_async: bool) -> Callable:
+        """Create the wrapper function."""
+        if is_async:
+
+            async def wrapped_fetch_url(*args: Any, **kwargs: Any) -> Any:
+                url = args[0] if args else kwargs.get("url", "UNKNOWN")
+                __event_emitter__ = kwargs.get("__event_emitter__")
+
+                dns_info = self._dns_precheck(url)
                 self._log_to_stderr(
-                    "WARNING: Could not find open_webui.tools.builtin.fetch_url. "
-                    "This plugin might not be compatible with your Open WebUI version."
+                    f"REQUEST INITIATED (ASYNC)\nURL: {url}\n{dns_info}\nArgs: {args}\nKwargs: {kwargs}"
                 )
-                return body
-
-            original_fetch_url = builtin_tools.fetch_url
-
-            # Defensive check: if it's already a wrapped function from us, skip
-            if getattr(original_fetch_url, "__is_fetch_url_debugger__", False):
-                self._patched = True
-                Filter._global_patched = True
-                return body
-
-            # Define the wrapper logic
-            def get_wrapped_logic(is_async: bool) -> Any:
-                if is_async:
-
-                    async def wrapped_fetch_url(*args: Any, **kwargs: Any) -> Any:
-                        url = args[0] if args else kwargs.get("url", "UNKNOWN")
-                        __event_emitter__ = kwargs.get("__event_emitter__")
-
-                        dns_info = self._dns_precheck(url)
-                        self._log_to_stderr(
-                            f"REQUEST INITIATED (ASYNC)\nURL: {url}\n{dns_info}\nArgs: {args}\nKwargs: {kwargs}"
+                if __event_emitter__:
+                    try:
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {"description": f"DEBUG: {dns_info}", "done": False},
+                            }
                         )
-                        if __event_emitter__:
-                            await __event_emitter__(
-                                {
-                                    "type": "status",
-                                    "data": {"description": f"DEBUG: {dns_info}", "done": False},
-                                }
-                            )
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {
+                                    "description": f"DEBUG: Calling native fetch_url for {url}...",
+                                    "done": False,
+                                },
+                            }
+                        )
+                    except Exception:
+                        pass
+
+                try:
+                    start_req = time.perf_counter()
+                    result = await original(*args, **kwargs)
+                    duration = (time.perf_counter() - start_req) * 1000
+                    self._log_to_stderr(
+                        f"REQUEST SUCCESSFUL\nURL: {url}\nDuration: {duration:.2f}ms"
+                    )
+                    return result
+                except Exception as e:
+                    category = self._get_error_category(e)
+                    stack = traceback.format_exc()
+                    self._log_to_stderr(
+                        f"REQUEST FAILED\nCATEGORY: {category}\nURL: {url}\nERROR: {str(e)}\n\nTRACEBACK:\n{stack}"
+                    )
+                    if __event_emitter__:
+                        try:
                             await __event_emitter__(
                                 {
                                     "type": "status",
                                     "data": {
-                                        "description": "DEBUG: Calling native fetch_url...",
+                                        "description": f"DEBUG: fetch_url failed ({category}): {str(e)}",
                                         "done": False,
                                     },
                                 }
                             )
+                        except Exception:
+                            pass
+                    raise e
 
+            return wrapped_fetch_url
+        else:
+
+            def wrapped_fetch_url(*args: Any, **kwargs: Any) -> Any:
+                url = args[0] if args else kwargs.get("url", "UNKNOWN")
+                __event_emitter__ = kwargs.get("__event_emitter__")
+
+                dns_info = self._dns_precheck(url)
+                self._log_to_stderr(
+                    f"REQUEST INITIATED (SYNC)\nURL: {url}\n{dns_info}\nArgs: {args}\nKwargs: {kwargs}"
+                )
+
+                if __event_emitter__:
+                    msg = {
+                        "type": "status",
+                        "data": {"description": f"DEBUG: {dns_info}", "done": False},
+                    }
+                    if inspect.iscoroutinefunction(__event_emitter__):
                         try:
-                            start_req = time.perf_counter()
-                            result = await original_fetch_url(*args, **kwargs)
-                            duration = (time.perf_counter() - start_req) * 1000
-                            self._log_to_stderr(
-                                f"REQUEST SUCCESSFUL\nURL: {url}\nDuration: {duration:.2f}ms"
-                            )
-                            return result
-                        except Exception as e:
-                            category = self._get_error_category(e)
-                            stack = traceback.format_exc()
-                            self._log_to_stderr(
-                                f"REQUEST FAILED\nCATEGORY: {category}\nURL: {url}\nERROR: {str(e)}\n\nTRACEBACK:\n{stack}"
-                            )
-                            if __event_emitter__:
-                                await __event_emitter__(
-                                    {
-                                        "type": "status",
-                                        "data": {
-                                            "description": f"DEBUG: fetch_url failed ({category}): {str(e)}",
-                                            "done": False,
-                                        },
-                                    }
-                                )
-                            raise e
-
-                    return wrapped_fetch_url
-                else:
-
-                    def wrapped_fetch_url(*args: Any, **kwargs: Any) -> Any:
-                        url = args[0] if args else kwargs.get("url", "UNKNOWN")
-                        __event_emitter__ = kwargs.get("__event_emitter__")
-
-                        dns_info = self._dns_precheck(url)
-                        self._log_to_stderr(
-                            f"REQUEST INITIATED (SYNC)\nURL: {url}\n{dns_info}\nArgs: {args}\nKwargs: {kwargs}"
-                        )
-                        if __event_emitter__:
-                            # We can't await here in sync, but we might be able to try to call it if it's not a coroutine
-                            # However, Open WebUI event_emitters are usually async.
-                            # For sync tools, we might be limited, but let's try a safe approach.
-                            if inspect.iscoroutinefunction(__event_emitter__):
-                                try:
-                                    # This is risky in sync code but common in some OWUI environments
-                                    loop = asyncio.get_event_loop()
-                                    if loop.is_running():
-                                        loop.create_task(
-                                            __event_emitter__(
-                                                {
-                                                    "type": "status",
-                                                    "data": {
-                                                        "description": f"DEBUG: {dns_info}",
-                                                        "done": False,
-                                                    },
-                                                }
-                                            )
-                                        )
-                                    else:
-                                        loop.run_until_complete(
-                                            __event_emitter__(
-                                                {
-                                                    "type": "status",
-                                                    "data": {
-                                                        "description": f"DEBUG: {dns_info}",
-                                                        "done": False,
-                                                    },
-                                                }
-                                            )
-                                        )
-                                except Exception:
-                                    pass
+                            loop = asyncio.get_event_loop()
+                            if loop.is_running():
+                                loop.create_task(__event_emitter__(msg))
                             else:
-                                try:
-                                    __event_emitter__(
-                                        {
-                                            "type": "status",
-                                            "data": {
-                                                "description": f"DEBUG: {dns_info}",
-                                                "done": False,
-                                            },
-                                        }
-                                    )
-                                except Exception:
-                                    pass
-
+                                loop.run_until_complete(__event_emitter__(msg))
+                        except Exception:
+                            pass
+                    else:
                         try:
-                            start_req = time.perf_counter()
-                            result = original_fetch_url(*args, **kwargs)
-                            duration = (time.perf_counter() - start_req) * 1000
-                            self._log_to_stderr(
-                                f"REQUEST SUCCESSFUL\nURL: {url}\nDuration: {duration:.2f}ms"
-                            )
-                            return result
-                        except Exception as e:
-                            category = self._get_error_category(e)
-                            stack = traceback.format_exc()
-                            self._log_to_stderr(
-                                f"REQUEST FAILED\nCATEGORY: {category}\nURL: {url}\nERROR: {str(e)}\n\nTRACEBACK:\n{stack}"
-                            )
-                            raise e
+                            __event_emitter__(msg)
+                        except Exception:
+                            pass
 
-                    return wrapped_fetch_url
+                try:
+                    start_req = time.perf_counter()
+                    result = original(*args, **kwargs)
+                    duration = (time.perf_counter() - start_req) * 1000
+                    self._log_to_stderr(
+                        f"REQUEST SUCCESSFUL\nURL: {url}\nDuration: {duration:.2f}ms"
+                    )
+                    return result
+                except Exception as e:
+                    category = self._get_error_category(e)
+                    stack = traceback.format_exc()
+                    self._log_to_stderr(
+                        f"REQUEST FAILED\nCATEGORY: {category}\nURL: {url}\nERROR: {str(e)}\n\nTRACEBACK:\n{stack}"
+                    )
+                    raise e
 
-            is_async = inspect.iscoroutinefunction(original_fetch_url)
-            wrapped = get_wrapped_logic(is_async)
-            wrapped.__is_fetch_url_debugger__ = True
-
-            # Apply the patch
-            builtin_tools.fetch_url = wrapped
-
-            self._patched = True
-            Filter._global_patched = True
-
-            logger.info(
-                "Fetch URL Debugger: Successfully patched open_webui.tools.builtin.fetch_url"
-            )
-            self._log_to_stderr(
-                "SUCCESS: open_webui.tools.builtin.fetch_url has been monkey-patched."
-            )
-
-        except Exception as e:
-            self._log_to_stderr(
-                f"ERROR: Unexpected error during patching: {str(e)}\n{traceback.format_exc()}"
-            )
-
-        return body
+            return wrapped_fetch_url
