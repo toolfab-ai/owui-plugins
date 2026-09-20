@@ -35,6 +35,7 @@ def mock_builtin_tools():
     mock_builtin = mock.MagicMock()
     mock_tools_router = mock.MagicMock()
     mock_retrieval_utils = mock.MagicMock()
+    mock_utils_tools = mock.MagicMock()
 
     modules = {
         "open_webui": mock.MagicMock(),
@@ -44,6 +45,8 @@ def mock_builtin_tools():
         "open_webui.apps.webui.routers.tools": mock_tools_router,
         "open_webui.tools": mock.MagicMock(),
         "open_webui.tools.builtin": mock_builtin,
+        "open_webui.utils": mock.MagicMock(),
+        "open_webui.utils.tools": mock_utils_tools,
         "open_webui.retrieval": mock.MagicMock(),
         "open_webui.retrieval.utils": mock_retrieval_utils,
     }
@@ -53,6 +56,7 @@ def mock_builtin_tools():
             "builtin": mock_builtin,
             "tools_router": mock_tools_router,
             "retrieval_utils": mock_retrieval_utils,
+            "utils_tools": mock_utils_tools,
         }
 
 
@@ -104,7 +108,11 @@ class TestFetchUrlDebugger:
         # Should have at least the heartbeat
         assert mock_event_emitter.call_count > 0
         calls = [call.args[0] for call in mock_event_emitter.call_args_list]
-        assert any("🔍 Fetch URL Debugger active" in c["data"]["description"] for c in calls)
+        assert any(
+            "🔍 Debugger active. Intercepting retrieval via get_content_from_url..."
+            in c["data"]["description"]
+            for c in calls
+        )
 
     @pytest.mark.asyncio
     async def test_aggressive_patching_sys_modules(self, filter_instance: Filter):
@@ -125,6 +133,22 @@ class TestFetchUrlDebugger:
             assert getattr(mock_mod.fetch_url, "__is_fetch_url_debugger__", False) is True
 
     @pytest.mark.asyncio
+    async def test_aggressive_patching_get_content_from_url(self, filter_instance: Filter):
+        """Verify that patching logic catches modules containing get_content_from_url."""
+        mock_mod = mock.MagicMock()
+
+        def get_content_from_url():
+            pass
+
+        mock_mod.get_content_from_url = get_content_from_url
+
+        with mock.patch.dict(sys.modules, {"dummy_retrieval_module": mock_mod}):
+            await filter_instance.inlet({})
+            assert (
+                getattr(mock_mod.get_content_from_url, "__is_fetch_url_debugger__", False) is True
+            )
+
+    @pytest.mark.asyncio
     async def test_inlet_patches_all_targets(
         self, filter_instance: Filter, mock_builtin_tools: Dict[str, mock.MagicMock]
     ):
@@ -136,6 +160,9 @@ class TestFetchUrlDebugger:
         mock_builtin_tools["tools_router"].fetch_url = mock.AsyncMock()
         mock_builtin_tools["tools_router"].fetch_url.__name__ = "fetch_url"
 
+        mock_builtin_tools["utils_tools"].fetch_url = mock.AsyncMock()
+        mock_builtin_tools["utils_tools"].fetch_url.__name__ = "fetch_url"
+
         mock_builtin_tools["retrieval_utils"].get_content_from_url = mock.AsyncMock()
         mock_builtin_tools["retrieval_utils"].get_content_from_url.__name__ = "get_content_from_url"
 
@@ -145,6 +172,9 @@ class TestFetchUrlDebugger:
         assert getattr(mock_builtin_tools["builtin"].fetch_url, "__is_fetch_url_debugger__", False)
         assert getattr(
             mock_builtin_tools["tools_router"].fetch_url, "__is_fetch_url_debugger__", False
+        )
+        assert getattr(
+            mock_builtin_tools["utils_tools"].fetch_url, "__is_fetch_url_debugger__", False
         )
         assert getattr(
             mock_builtin_tools["retrieval_utils"].get_content_from_url,
@@ -299,8 +329,12 @@ class TestFetchUrlDebugger:
             calls = [call.args[0] for call in mock_event_emitter.call_args_list]
 
             # Should have at least the DNS check and the native call status
-            assert any("🌐 fetch_url | DNS: example.com" in c["data"]["description"] for c in calls)
-            assert any("✅ fetch_url | SUCCESS" in c["data"]["description"] for c in calls)
+            assert any(
+                "🌐 Calling fetch_url for http://example.com | DNS: example.com"
+                in c["data"]["description"]
+                for c in calls
+            )
+            assert any("✅ fetch_url SUCCESS" in c["data"]["description"] for c in calls)
 
     @pytest.mark.asyncio
     async def test_emits_error_status_events(
@@ -322,7 +356,7 @@ class TestFetchUrlDebugger:
 
         calls = [call.args[0] for call in mock_event_emitter.call_args_list]
         assert any(
-            "❌ fetch_url | FAILED (TIMEOUT): Connection timed out" in c["data"]["description"]
+            "❌ fetch_url FAILED (TIMEOUT): Connection timed out" in c["data"]["description"]
             for c in calls
         )
 
@@ -351,7 +385,10 @@ class TestFetchUrlDebugger:
 
         # Check sync emitter was called (async emitter mock called from sync loop)
         calls = [call.args[0] for call in mock_event_emitter.call_args_list]
-        assert any("🌐 fetch_url | DNS:" in c["data"]["description"] for c in calls)
+        assert any(
+            "🌐 Calling fetch_url for http://example.com | DNS:" in c["data"]["description"]
+            for c in calls
+        )
 
 
 @pytest.mark.integration
