@@ -15,6 +15,7 @@ from tests._plugin_loader import load_plugin
 # Dynamically load the plugin module
 plugin_module = load_plugin("fetch-url-debugger")
 Filter = plugin_module.Filter
+emitter_var = plugin_module.emitter_var
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 
@@ -57,6 +58,8 @@ def filter_instance():
     """Provides a fresh instance of the Filter and resets global state."""
     # Reset the global patched flag before each test
     Filter._global_patched = False
+    # Clear the ContextVar
+    emitter_var.set(None)
     return Filter()
 
 
@@ -68,6 +71,19 @@ def mock_event_emitter():
 
 @pytest.mark.unit
 class TestFetchUrlDebugger:
+    @pytest.mark.asyncio
+    async def test_inlet_sets_context_var(
+        self,
+        filter_instance: Filter,
+        mock_builtin_tools: mock.MagicMock,
+        mock_event_emitter: mock.AsyncMock,
+    ):
+        """Verify that inlet sets the ContextVar."""
+        body: Dict[str, Any] = {}
+        await filter_instance.inlet(body, __event_emitter__=mock_event_emitter)
+
+        assert emitter_var.get() == mock_event_emitter
+
     @pytest.mark.asyncio
     async def test_inlet_emits_heartbeat(
         self,
@@ -253,17 +269,17 @@ class TestFetchUrlDebugger:
         original_fetch_url.__is_fetch_url_debugger__ = False
         mock_builtin_tools.fetch_url = original_fetch_url
 
-        await filter_instance.inlet({})
+        # inlet sets the emitter in ContextVar
+        await filter_instance.inlet({}, __event_emitter__=mock_event_emitter)
 
         with mock.patch("socket.getaddrinfo") as mock_getaddrinfo:
             mock_getaddrinfo.return_value = [
                 (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))
             ]
 
-            # Call patched function with event emitter
-            await mock_builtin_tools.fetch_url(
-                "http://example.com", __event_emitter__=mock_event_emitter
-            )
+            # Call patched function
+            # The wrapped function will retrieve the emitter from ContextVar
+            await mock_builtin_tools.fetch_url("http://example.com")
 
             # Check that event emitter was called with expected statuses
             calls = [call.args[0] for call in mock_event_emitter.call_args_list]
@@ -287,12 +303,10 @@ class TestFetchUrlDebugger:
         original_fetch_url.__is_fetch_url_debugger__ = False
         mock_builtin_tools.fetch_url = original_fetch_url
 
-        await filter_instance.inlet({})
+        await filter_instance.inlet({}, __event_emitter__=mock_event_emitter)
 
         with pytest.raises(TimeoutError):
-            await mock_builtin_tools.fetch_url(
-                "http://example.com", __event_emitter__=mock_event_emitter
-            )
+            await mock_builtin_tools.fetch_url("http://example.com")
 
         calls = [call.args[0] for call in mock_event_emitter.call_args_list]
         assert any(
@@ -306,13 +320,14 @@ class TestFetchUrlDebugger:
         filter_instance: Filter,
         mock_builtin_tools: mock.MagicMock,
         capsys: pytest.CaptureFixture,
+        mock_event_emitter: mock.AsyncMock,
     ):
         """Verify that it correctly patches and calls a synchronous fetch_url."""
         original_fetch_url = mock.MagicMock(return_value="sync_result")
         original_fetch_url.__is_fetch_url_debugger__ = False
         mock_builtin_tools.fetch_url = original_fetch_url
 
-        await filter_instance.inlet({})
+        await filter_instance.inlet({}, __event_emitter__=mock_event_emitter)
 
         # In this case, the patched function should be synchronous as well
         # based on inspect.iscoroutinefunction(original_fetch_url)
@@ -323,8 +338,9 @@ class TestFetchUrlDebugger:
         assert "REQUEST INITIATED (SYNC)" in captured.err
         assert "REQUEST SUCCESSFUL" in captured.err
 
-
-# ... existing imports ...
+        # Check sync emitter was called (async emitter mock called from sync loop)
+        calls = [call.args[0] for call in mock_event_emitter.call_args_list]
+        assert any("DEBUG: DNS Check" in c["data"]["description"] for c in calls)
 
 
 @pytest.mark.integration
@@ -353,5 +369,5 @@ class TestFetchUrlDebuggerIntegration:
         spec = await owui_client.get_function_valves_spec("fetch_url_debugger")
         assert spec is not None
         props = spec.get("properties", {})
-        assert "ENABLED" in props
-        assert "PRIORITY" in props
+        assert "enabled" in props
+        assert "priority" in props
