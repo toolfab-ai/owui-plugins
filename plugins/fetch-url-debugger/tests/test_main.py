@@ -56,8 +56,7 @@ def mock_builtin_tools():
 def filter_instance():
     """Provides a fresh instance of the Filter and resets global state."""
     # Reset the global patched flag before each test
-    if hasattr(Filter, "_global_patched"):
-        Filter._global_patched = False
+    Filter._global_patched = False
     return Filter()
 
 
@@ -69,6 +68,40 @@ def mock_event_emitter():
 
 @pytest.mark.unit
 class TestFetchUrlDebugger:
+    @pytest.mark.asyncio
+    async def test_inlet_emits_heartbeat(
+        self,
+        filter_instance: Filter,
+        mock_builtin_tools: mock.MagicMock,
+        mock_event_emitter: mock.AsyncMock,
+    ):
+        """Verify that inlet emits the heartbeat status message."""
+        body: Dict[str, Any] = {}
+        await filter_instance.inlet(body, __event_emitter__=mock_event_emitter)
+
+        # Check for heartbeat call
+        heartbeat_call = mock_event_emitter.call_args_list[0].args[0]
+        assert heartbeat_call["type"] == "status"
+        assert "DEBUG: Fetch URL Debugger active" in heartbeat_call["data"]["description"]
+
+    @pytest.mark.asyncio
+    async def test_aggressive_patching_sys_modules(self, filter_instance: Filter):
+        """Verify that patching logic searches through sys.modules."""
+        # Create a mock module that has a fetch_url function
+        mock_mod = mock.MagicMock()
+
+        def fetch_url():
+            pass
+
+        mock_mod.fetch_url = fetch_url
+
+        # Mock sys.modules
+        with mock.patch.dict(sys.modules, {"dummy_tool_module": mock_mod}):
+            await filter_instance.inlet({})
+
+            # Verify the function in the dummy module was patched
+            assert getattr(mock_mod.fetch_url, "__is_fetch_url_debugger__", False) is True
+
     @pytest.mark.asyncio
     async def test_inlet_patches_fetch_url(
         self, filter_instance: Filter, mock_builtin_tools: mock.MagicMock
@@ -239,9 +272,7 @@ class TestFetchUrlDebugger:
             assert any(
                 "DEBUG: DNS Check: Resolved example.com" in c["data"]["description"] for c in calls
             )
-            assert any(
-                "DEBUG: Calling native fetch_url..." in c["data"]["description"] for c in calls
-            )
+            assert any("DEBUG: Calling native fetch_url" in c["data"]["description"] for c in calls)
 
     @pytest.mark.asyncio
     async def test_emits_error_status_events(
