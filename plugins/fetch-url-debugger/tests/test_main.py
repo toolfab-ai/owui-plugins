@@ -31,26 +31,29 @@ def plugin_source() -> str:
 
 @pytest.fixture
 def mock_builtin_tools():
-    """Mock open_webui.tools.builtin to avoid ImportErrors and allow patching."""
+    """Mock open_webui modules to avoid ImportErrors and allow patching."""
     mock_builtin = mock.MagicMock()
-    mock_tools = mock.MagicMock()
-    mock_open_webui = mock.MagicMock()
-
-    mock_open_webui.tools = mock_tools
-    mock_tools.builtin = mock_builtin
-
-    # Crucially, we need to make sure fetch_url doesn't look like it's already patched
-    # MagicMocks return another MagicMock for any attribute access, which is truthy.
-    # We'll set the specific attribute to False.
+    mock_tools_router = mock.MagicMock()
+    mock_retrieval_utils = mock.MagicMock()
 
     modules = {
-        "open_webui": mock_open_webui,
-        "open_webui.tools": mock_tools,
+        "open_webui": mock.MagicMock(),
+        "open_webui.apps": mock.MagicMock(),
+        "open_webui.apps.webui": mock.MagicMock(),
+        "open_webui.apps.webui.routers": mock.MagicMock(),
+        "open_webui.apps.webui.routers.tools": mock_tools_router,
+        "open_webui.tools": mock.MagicMock(),
         "open_webui.tools.builtin": mock_builtin,
+        "open_webui.retrieval": mock.MagicMock(),
+        "open_webui.retrieval.utils": mock_retrieval_utils,
     }
 
     with mock.patch.dict(sys.modules, modules):
-        yield mock_builtin
+        yield {
+            "builtin": mock_builtin,
+            "tools_router": mock_tools_router,
+            "retrieval_utils": mock_retrieval_utils,
+        }
 
 
 @pytest.fixture
@@ -75,7 +78,7 @@ class TestFetchUrlDebugger:
     async def test_inlet_sets_context_var(
         self,
         filter_instance: Filter,
-        mock_builtin_tools: mock.MagicMock,
+        mock_builtin_tools: Dict[str, mock.MagicMock],
         mock_event_emitter: mock.AsyncMock,
     ):
         """Verify that inlet sets the ContextVar."""
@@ -85,20 +88,23 @@ class TestFetchUrlDebugger:
         assert emitter_var.get() == mock_event_emitter
 
     @pytest.mark.asyncio
-    async def test_inlet_emits_heartbeat(
+    async def test_inlet_respects_verbose_ui(
         self,
         filter_instance: Filter,
-        mock_builtin_tools: mock.MagicMock,
+        mock_builtin_tools: Dict[str, mock.MagicMock],
         mock_event_emitter: mock.AsyncMock,
     ):
-        """Verify that inlet emits the heartbeat status message."""
-        body: Dict[str, Any] = {}
-        await filter_instance.inlet(body, __event_emitter__=mock_event_emitter)
+        """Verify that inlet respects the verbose_ui toggle."""
+        filter_instance.valves.verbose_ui = False
+        await filter_instance.inlet({}, __event_emitter__=mock_event_emitter)
+        assert mock_event_emitter.call_count == 0
 
-        # Check for heartbeat call
-        heartbeat_call = mock_event_emitter.call_args_list[0].args[0]
-        assert heartbeat_call["type"] == "status"
-        assert "DEBUG: Fetch URL Debugger active" in heartbeat_call["data"]["description"]
+        filter_instance.valves.verbose_ui = True
+        await filter_instance.inlet({}, __event_emitter__=mock_event_emitter)
+        # Should have at least the heartbeat
+        assert mock_event_emitter.call_count > 0
+        calls = [call.args[0] for call in mock_event_emitter.call_args_list]
+        assert any("🔍 Fetch URL Debugger active" in c["data"]["description"] for c in calls)
 
     @pytest.mark.asyncio
     async def test_aggressive_patching_sys_modules(self, filter_instance: Filter):
@@ -119,97 +125,106 @@ class TestFetchUrlDebugger:
             assert getattr(mock_mod.fetch_url, "__is_fetch_url_debugger__", False) is True
 
     @pytest.mark.asyncio
-    async def test_inlet_patches_fetch_url(
-        self, filter_instance: Filter, mock_builtin_tools: mock.MagicMock
+    async def test_inlet_patches_all_targets(
+        self, filter_instance: Filter, mock_builtin_tools: Dict[str, mock.MagicMock]
     ):
-        """Verify that calling inlet patches open_webui.tools.builtin.fetch_url."""
-        # Setup original fetch_url
-        original_fetch_url = mock.AsyncMock(return_value="success")
-        # Ensure it doesn't appear already patched
-        original_fetch_url.__is_fetch_url_debugger__ = False
-        mock_builtin_tools.fetch_url = original_fetch_url
+        """Verify that inlet patches targeted modules."""
+        # Setup targets
+        mock_builtin_tools["builtin"].fetch_url = mock.AsyncMock()
+        mock_builtin_tools["builtin"].fetch_url.__name__ = "fetch_url"
 
-        # Run inlet
-        body: Dict[str, Any] = {}
-        await filter_instance.inlet(body)
+        mock_builtin_tools["tools_router"].fetch_url = mock.AsyncMock()
+        mock_builtin_tools["tools_router"].fetch_url.__name__ = "fetch_url"
 
-        # Verify it is patched
-        assert mock_builtin_tools.fetch_url != original_fetch_url
-        assert getattr(mock_builtin_tools.fetch_url, "__is_fetch_url_debugger__", False) is True
+        mock_builtin_tools["retrieval_utils"].get_content_from_url = mock.AsyncMock()
+        mock_builtin_tools["retrieval_utils"].get_content_from_url.__name__ = "get_content_from_url"
+
+        await filter_instance.inlet({})
+
+        # Verify all are patched
+        assert getattr(mock_builtin_tools["builtin"].fetch_url, "__is_fetch_url_debugger__", False)
+        assert getattr(
+            mock_builtin_tools["tools_router"].fetch_url, "__is_fetch_url_debugger__", False
+        )
+        assert getattr(
+            mock_builtin_tools["retrieval_utils"].get_content_from_url,
+            "__is_fetch_url_debugger__",
+            False,
+        )
 
     @pytest.mark.asyncio
     async def test_patch_only_once(
-        self, filter_instance: Filter, mock_builtin_tools: mock.MagicMock
+        self, filter_instance: Filter, mock_builtin_tools: Dict[str, mock.MagicMock]
     ):
         """Verify that the patch is only applied once, even across instances."""
-        original_fetch_url = mock.AsyncMock(return_value="success")
-        original_fetch_url.__is_fetch_url_debugger__ = False
-        mock_builtin_tools.fetch_url = original_fetch_url
+        mock_builtin_tools["builtin"].fetch_url = mock.AsyncMock()
+        mock_builtin_tools["builtin"].fetch_url.__name__ = "fetch_url"
 
         # First call
         await filter_instance.inlet({})
-        patched_func = mock_builtin_tools.fetch_url
+        patched_func = mock_builtin_tools["builtin"].fetch_url
 
         # Second call
         await filter_instance.inlet({})
-        assert mock_builtin_tools.fetch_url == patched_func
+        assert mock_builtin_tools["builtin"].fetch_url == patched_func
 
         # Create another instance
         another_filter = Filter()
         await another_filter.inlet({})
-        assert mock_builtin_tools.fetch_url == patched_func
+        assert mock_builtin_tools["builtin"].fetch_url == patched_func
 
     @pytest.mark.asyncio
     async def test_wrapped_function_calls_original(
-        self, filter_instance: Filter, mock_builtin_tools: mock.MagicMock
+        self, filter_instance: Filter, mock_builtin_tools: Dict[str, mock.MagicMock]
     ):
-        """Verify that the wrapped function correctly calls the original fetch_url."""
-        original_fetch_url = mock.AsyncMock(return_value="result_data")
-        original_fetch_url.__is_fetch_url_debugger__ = False
-        mock_builtin_tools.fetch_url = original_fetch_url
+        """Verify that the wrapped function correctly calls the original function."""
+        original = mock.AsyncMock(return_value="result_data")
+        original.__name__ = "fetch_url"
+        mock_builtin_tools["builtin"].fetch_url = original
 
         await filter_instance.inlet({})
 
         # Call the patched function
-        result = await mock_builtin_tools.fetch_url("http://example.com", some_arg="value")
+        result = await mock_builtin_tools["builtin"].fetch_url(
+            "http://example.com", some_arg="value"
+        )
 
         assert result == "result_data"
-        original_fetch_url.assert_called_once_with("http://example.com", some_arg="value")
+        original.assert_called_once_with("http://example.com", some_arg="value")
 
     @pytest.mark.asyncio
     async def test_logs_to_stderr(
         self,
         filter_instance: Filter,
-        mock_builtin_tools: mock.MagicMock,
+        mock_builtin_tools: Dict[str, mock.MagicMock],
         capsys: pytest.CaptureFixture,
     ):
         """Verify that the wrapped function logs request details to sys.stderr."""
-        original_fetch_url = mock.AsyncMock(return_value="ok")
-        original_fetch_url.__is_fetch_url_debugger__ = False
-        mock_builtin_tools.fetch_url = original_fetch_url
+        original = mock.AsyncMock(return_value="ok")
+        original.__name__ = "fetch_url"
+        mock_builtin_tools["builtin"].fetch_url = original
 
         await filter_instance.inlet({})
 
         # Call patched function
-        await mock_builtin_tools.fetch_url("http://example.com")
+        await mock_builtin_tools["builtin"].fetch_url("http://example.com")
 
         captured = capsys.readouterr()
-        assert "FETCH URL DEBUGGER" in captured.err
-        assert "REQUEST INITIATED" in captured.err
+        assert "CALLING fetch_url" in captured.err
         assert "URL: http://example.com" in captured.err
-        assert "REQUEST SUCCESSFUL" in captured.err
+        assert "SUCCESS: fetch_url" in captured.err
 
     @pytest.mark.asyncio
     async def test_dns_precheck(
         self,
         filter_instance: Filter,
-        mock_builtin_tools: mock.MagicMock,
+        mock_builtin_tools: Dict[str, mock.MagicMock],
         capsys: pytest.CaptureFixture,
     ):
         """Verify DNS pre-check behavior by mocking socket.getaddrinfo."""
-        original_fetch_url = mock.AsyncMock(return_value="ok")
-        original_fetch_url.__is_fetch_url_debugger__ = False
-        mock_builtin_tools.fetch_url = original_fetch_url
+        original = mock.AsyncMock(return_value="ok")
+        original.__name__ = "fetch_url"
+        mock_builtin_tools["builtin"].fetch_url = original
 
         with mock.patch("socket.getaddrinfo") as mock_getaddrinfo:
             # Mock successful DNS resolution
@@ -218,10 +233,10 @@ class TestFetchUrlDebugger:
             ]
 
             await filter_instance.inlet({})
-            await mock_builtin_tools.fetch_url("http://example.com")
+            await mock_builtin_tools["builtin"].fetch_url("http://example.com")
 
             captured = capsys.readouterr()
-            assert "DNS Check: Resolved example.com to ['93.184.216.34']" in captured.err
+            assert "DNS: example.com -> ['93.184.216.34']" in captured.err
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -237,37 +252,37 @@ class TestFetchUrlDebugger:
     async def test_error_categorization(
         self,
         filter_instance: Filter,
-        mock_builtin_tools: mock.MagicMock,
+        mock_builtin_tools: Dict[str, mock.MagicMock],
         capsys: pytest.CaptureFixture,
         exception: Exception,
         expected_category: str,
     ):
         """Verify error categorization by mocking the original function to raise errors."""
-        original_fetch_url = mock.AsyncMock(side_effect=exception)
-        original_fetch_url.__is_fetch_url_debugger__ = False
-        mock_builtin_tools.fetch_url = original_fetch_url
+        original = mock.AsyncMock(side_effect=exception)
+        original.__name__ = "fetch_url"
+        mock_builtin_tools["builtin"].fetch_url = original
 
         await filter_instance.inlet({})
 
         with pytest.raises(type(exception)):
-            await mock_builtin_tools.fetch_url("http://example.com")
+            await mock_builtin_tools["builtin"].fetch_url("http://example.com")
 
         captured = capsys.readouterr()
-        assert "REQUEST FAILED" in captured.err
-        assert f"CATEGORY: {expected_category}" in captured.err
-        assert f"ERROR: {str(exception)}" in captured.err
+        assert "FAILED: fetch_url" in captured.err
+        assert f"FAILED: fetch_url | {expected_category}" in captured.err
+        assert f"| {str(exception)}" in captured.err
 
     @pytest.mark.asyncio
     async def test_emits_status_events(
         self,
         filter_instance: Filter,
-        mock_builtin_tools: mock.MagicMock,
+        mock_builtin_tools: Dict[str, mock.MagicMock],
         mock_event_emitter: mock.AsyncMock,
     ):
         """Verify that the wrapped function emits UI status events."""
-        original_fetch_url = mock.AsyncMock(return_value="ok")
-        original_fetch_url.__is_fetch_url_debugger__ = False
-        mock_builtin_tools.fetch_url = original_fetch_url
+        original = mock.AsyncMock(return_value="ok")
+        original.__name__ = "fetch_url"
+        mock_builtin_tools["builtin"].fetch_url = original
 
         # inlet sets the emitter in ContextVar
         await filter_instance.inlet({}, __event_emitter__=mock_event_emitter)
@@ -278,39 +293,36 @@ class TestFetchUrlDebugger:
             ]
 
             # Call patched function
-            # The wrapped function will retrieve the emitter from ContextVar
-            await mock_builtin_tools.fetch_url("http://example.com")
+            await mock_builtin_tools["builtin"].fetch_url("http://example.com")
 
             # Check that event emitter was called with expected statuses
             calls = [call.args[0] for call in mock_event_emitter.call_args_list]
 
             # Should have at least the DNS check and the native call status
-            assert any(
-                "DEBUG: DNS Check: Resolved example.com" in c["data"]["description"] for c in calls
-            )
-            assert any("DEBUG: Calling native fetch_url" in c["data"]["description"] for c in calls)
+            assert any("🌐 fetch_url | DNS: example.com" in c["data"]["description"] for c in calls)
+            assert any("✅ fetch_url | SUCCESS" in c["data"]["description"] for c in calls)
 
     @pytest.mark.asyncio
     async def test_emits_error_status_events(
         self,
         filter_instance: Filter,
-        mock_builtin_tools: mock.MagicMock,
+        mock_builtin_tools: Dict[str, mock.MagicMock],
         mock_event_emitter: mock.AsyncMock,
     ):
         """Verify that the wrapped function emits UI status events on failure."""
         exception = TimeoutError("Connection timed out")
-        original_fetch_url = mock.AsyncMock(side_effect=exception)
-        original_fetch_url.__is_fetch_url_debugger__ = False
-        mock_builtin_tools.fetch_url = original_fetch_url
+        original = mock.AsyncMock(side_effect=exception)
+        original.__name__ = "fetch_url"
+        mock_builtin_tools["builtin"].fetch_url = original
 
         await filter_instance.inlet({}, __event_emitter__=mock_event_emitter)
 
         with pytest.raises(TimeoutError):
-            await mock_builtin_tools.fetch_url("http://example.com")
+            await mock_builtin_tools["builtin"].fetch_url("http://example.com")
 
         calls = [call.args[0] for call in mock_event_emitter.call_args_list]
         assert any(
-            "DEBUG: fetch_url failed (TIMEOUT): Connection timed out" in c["data"]["description"]
+            "❌ fetch_url | FAILED (TIMEOUT): Connection timed out" in c["data"]["description"]
             for c in calls
         )
 
@@ -318,29 +330,28 @@ class TestFetchUrlDebugger:
     async def test_handles_sync_function(
         self,
         filter_instance: Filter,
-        mock_builtin_tools: mock.MagicMock,
+        mock_builtin_tools: Dict[str, mock.MagicMock],
         capsys: pytest.CaptureFixture,
         mock_event_emitter: mock.AsyncMock,
     ):
-        """Verify that it correctly patches and calls a synchronous fetch_url."""
-        original_fetch_url = mock.MagicMock(return_value="sync_result")
-        original_fetch_url.__is_fetch_url_debugger__ = False
-        mock_builtin_tools.fetch_url = original_fetch_url
+        """Verify that it correctly patches and calls a synchronous function."""
+        original = mock.MagicMock(return_value="sync_result")
+        original.__name__ = "fetch_url"
+        mock_builtin_tools["builtin"].fetch_url = original
 
         await filter_instance.inlet({}, __event_emitter__=mock_event_emitter)
 
         # In this case, the patched function should be synchronous as well
-        # based on inspect.iscoroutinefunction(original_fetch_url)
-        result = mock_builtin_tools.fetch_url("http://example.com")
+        result = mock_builtin_tools["builtin"].fetch_url("http://example.com")
 
         assert result == "sync_result"
         captured = capsys.readouterr()
-        assert "REQUEST INITIATED (SYNC)" in captured.err
-        assert "REQUEST SUCCESSFUL" in captured.err
+        assert "CALLING fetch_url (SYNC)" in captured.err
+        assert "SUCCESS: fetch_url" in captured.err
 
         # Check sync emitter was called (async emitter mock called from sync loop)
         calls = [call.args[0] for call in mock_event_emitter.call_args_list]
-        assert any("DEBUG: DNS Check" in c["data"]["description"] for c in calls)
+        assert any("🌐 fetch_url | DNS:" in c["data"]["description"] for c in calls)
 
 
 @pytest.mark.integration
@@ -371,3 +382,4 @@ class TestFetchUrlDebuggerIntegration:
         props = spec.get("properties", {})
         assert "enabled" in props
         assert "priority" in props
+        assert "verbose_ui" in props
