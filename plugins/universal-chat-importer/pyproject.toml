@@ -1,0 +1,6 @@
+[project]
+name = "universal-chat-importer"
+version = "0.1.0"
+description = "Import ChatGPT exports into Open WebUI"
+requires-python = ">=3.11"
+dependencies = []
