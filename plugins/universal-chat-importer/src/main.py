@@ -10,7 +10,7 @@ import uuid
 import zipfile
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from ._valves import Valves
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -48,20 +48,6 @@ def _get_db_path() -> str:
         if os.path.isfile(p):
             return p
     return paths[0]
-
-
-# ========================================================================
-# VALVES CLASS
-# ========================================================================
-
-
-class Valves(BaseModel):
-    """Admin-configurable settings for the Universal Chat Importer."""
-
-    DEFAULT_MODEL: str = Field(
-        default="gpt-4o",
-        description="The model name to assign to imported chats if not specified.",
-    )
 
 
 # ========================================================================
@@ -220,8 +206,8 @@ class Tools:
                 # Join text parts, skip non-string parts for now
                 content = "\n".join([str(p) for p in parts if isinstance(p, (str, int, float))])
 
-            if not content and role != "system":
-                continue  # Skip empty messages except system
+            if not content.strip() and role != "system":
+                continue  # Skip empty or whitespace-only messages except system
 
             msg_id = msg_obj.get("id", node_id)
             parent_id = node.get("parent")
@@ -241,13 +227,14 @@ class Tools:
         current_node_id = conv.get("current_node")
         active_path: List[str] = []
         curr = current_node_id
-        while curr and curr in history_messages:
+        while curr and curr in mapping:
             active_path.append(curr)
-            curr = history_messages[curr].get("parentId")
+            curr = mapping[curr].get("parent")
         active_path.reverse()
 
         for msg_id in active_path:
-            owui_messages.append(history_messages[msg_id])
+            if msg_id in history_messages:
+                owui_messages.append(history_messages[msg_id])
 
         return {
             "title": title,
