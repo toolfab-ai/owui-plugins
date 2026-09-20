@@ -10,6 +10,7 @@ import uuid
 import zipfile
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from ._updates import UpdateMixin
 from ._valves import Valves
 
 # ---------------------------------------------------------------------------
@@ -55,7 +56,7 @@ def _get_db_path() -> str:
 # ========================================================================
 
 
-class Tools:
+class Tools(UpdateMixin):
     """Tools for importing chat history from external platforms."""
 
     def __init__(self) -> None:
@@ -73,6 +74,7 @@ class Tools:
         :param file_id: The UUID of the uploaded file in Open WebUI.
         :return: A summary message of the import process.
         """
+        user_id = __user__.get("id", "")
         if __event_emitter__:
             await __event_emitter__(
                 {
@@ -98,11 +100,6 @@ class Tools:
             conversations = self._load_conversations(file_path)
             if not conversations:
                 return "Error: Could not find conversations.json in the provided file."
-
-            # 3. Process conversations
-            user_id = __user__.get("id")
-            if not user_id:
-                return "Error: User ID not found in context."
 
             imported_count = 0
             error_count = 0
@@ -184,8 +181,6 @@ class Tools:
         owui_messages: List[Dict[str, Any]] = []
         history_messages: Dict[str, Dict[str, Any]] = {}
 
-        # ChatGPT uses a DAG/tree. OWUI uses messages (linear) + history (tree).
-        # We'll build the history tree first.
         for node_id, node in mapping.items():
             msg_obj = node.get("message")
             if not msg_obj:
@@ -195,19 +190,18 @@ class Tools:
             role = author.get("role")
             if role not in ["user", "assistant", "system"]:
                 if role == "tool":
-                    role = "assistant"  # Map tools to assistant for now
+                    role = "assistant"
                 else:
-                    continue  # Skip unknown roles
+                    continue
 
             content_obj = msg_obj.get("content", {})
             parts = content_obj.get("parts", [])
             content = ""
             if parts:
-                # Join text parts, skip non-string parts for now
                 content = "\n".join([str(p) for p in parts if isinstance(p, (str, int, float))])
 
             if not content.strip() and role != "system":
-                continue  # Skip empty or whitespace-only messages except system
+                continue
 
             msg_id = msg_obj.get("id", node_id)
             parent_id = node.get("parent")
@@ -223,7 +217,6 @@ class Tools:
         if not history_messages:
             return None
 
-        # Determine the current branch (active path)
         current_node_id = conv.get("current_node")
         active_path: List[str] = []
         curr = current_node_id
@@ -256,7 +249,6 @@ class Tools:
         created_at = int(chat_data.get("timestamp", now))
         updated_at = int(chat_data.get("updated_at", now))
 
-        # Open WebUI expects the 'chat' column to be a JSON string
         chat_json = json.dumps(
             {
                 "id": chat_id,
