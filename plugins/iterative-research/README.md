@@ -59,7 +59,7 @@ The plugin can be fully configured by administrators through the Open WebUI Admi
 | **CHECK_PREVIEW_RELEASES** | `bool` | `False` | Also checks for pre-release, dev, and preview tags on GitHub. |
 | **SEARXNG_URL** | `str` | `""` | The base URL of your SearXNG instance (e.g., `http://searxng:8080`) for private, self-hosted web search. |
 | **TAVILY_API_KEY** | `str` | `""` | API key for Tavily Search (alternative or primary search engine API). |
-| **MODEL** | `str` | `""` | The internal LLM model ID used for planning, reasoning, and synthesis. (Left blank to auto-detect from active models). |
+| **MODEL** | `str` | `""` | The internal LLM model ID used for planning, reasoning, and synthesis. (A valid model ID must be configured). |
 | **MAX_STEPS** | `int` | `3` | Maximum number of search-reasoning loops to perform (range: `1` to `10`). |
 | **MAX_PAGES_TO_SCRAPE** | `int` | `3` | Maximum number of new web pages to crawl and digest concurrently per iteration (range: `1` to `10`). |
 | **CO_STORM_STEERING** | `bool` | `False` | Pauses the research loop after Step 1 to allow interactive user feedback (Co-STORM style). |

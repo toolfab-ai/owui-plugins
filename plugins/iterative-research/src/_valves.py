@@ -25,8 +25,7 @@ class Valves(BaseModel):
     MODEL: str = Field(
         default="",
         description="The internal LLM model ID to use for research planning, gap analysis, "
-        "and final synthesis. If left empty, the plugin will attempt to auto-detect "
-        "an available model from the workspace.",
+        "and final synthesis. A valid model ID must be configured.",
     )
     MAX_STEPS: int = Field(
         default=3,

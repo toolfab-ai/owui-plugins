@@ -41,6 +41,7 @@ class TestPipeMainEntryPoint:
         self.pipe.valves.MAX_STEPS = 1
         self.pipe.valves.MAX_PAGES_TO_SCRAPE = 1
         self.pipe.valves.MODEL = "mock-model"
+        self.pipe.valves.TAVILY_API_KEY = "mock-key"
 
         # Mock search query helper
         async def mock_search(query: str, user_valves: Any = None) -> list[dict[str, str]]:
@@ -183,6 +184,7 @@ class TestPipeMainEntryPoint:
         self.pipe.valves.MAX_STEPS = 1
         self.pipe.valves.MAX_PAGES_TO_SCRAPE = 1
         self.pipe.valves.MODEL = "mock-model"
+        self.pipe.valves.TAVILY_API_KEY = "mock-key"
 
         # Mock search query helper
         async def mock_search(query: str, user_valves: Any = None) -> list[dict[str, str]]:
@@ -258,6 +260,7 @@ class TestCoStormSteering:
         self.pipe.valves.MAX_STEPS = 2
         self.pipe.valves.MAX_PAGES_TO_SCRAPE = 1
         self.pipe.valves.MODEL = "mock-model"
+        self.pipe.valves.TAVILY_API_KEY = "mock-key"
 
         async def mock_search(query: str, user_valves: Any = None) -> list[dict[str, str]]:
             return [
@@ -326,6 +329,7 @@ class TestCoStormSteering:
         self.pipe.valves.MAX_STEPS = 2
         self.pipe.valves.MAX_PAGES_TO_SCRAPE = 1
         self.pipe.valves.MODEL = "mock-model"
+        self.pipe.valves.TAVILY_API_KEY = "mock-key"
 
         async def mock_search(query: str, user_valves: Any = None) -> list[dict[str, str]]:
             return [
@@ -405,3 +409,311 @@ class TestCoStormSteering:
             ]
             complete_call = next(c for c in status_calls if "complete" in c["data"]["description"])
             assert complete_call["data"]["done"] is True
+
+    @pytest.mark.asyncio
+    async def test_pipe_validation_no_search_engine(self) -> None:
+        """Verify pre-flight validation fails and halts when no search engine is configured."""
+        self.pipe.valves.TAVILY_API_KEY = ""
+        self.pipe.valves.SEARXNG_URL = ""
+        self.pipe.valves.MODEL = "mock-model"
+
+        event_emitter = AsyncMock()
+        body = {
+            "stream": True,
+            "messages": [{"role": "user", "content": "test query"}],
+        }
+
+        generator = await self.pipe.pipe(
+            body=body,
+            __user__=None,
+            __request__=None,
+            __event_emitter__=event_emitter,
+        )
+        chunks = []
+        async for chunk in generator:
+            chunks.append(chunk)
+
+        full_output = "".join(chunks)
+
+        # Assert search engine configuration error is in the output and it immediately returned
+        assert "Configuration Error" in full_output
+        assert "No search engine is configured" in full_output
+        assert "<thinking>" not in full_output  # Halts before executing any step
+
+        # Verify status event was emitted with done: True
+        emitted_types = [call[0][0]["type"] for call in event_emitter.call_args_list]
+        assert "status" in emitted_types
+        status_call = event_emitter.call_args_list[0][0][0]
+        assert (
+            status_call["data"]["description"]
+            == "Configuration Error: No search engine configured."
+        )
+        assert status_call["data"]["done"] is True
+
+    @pytest.mark.asyncio
+    async def test_pipe_validation_no_model(self) -> None:
+        """Verify pre-flight validation fails and halts when no model is specified."""
+        self.pipe.valves.TAVILY_API_KEY = "mock-key"
+        self.pipe.valves.SEARXNG_URL = ""
+        self.pipe.valves.MODEL = ""
+
+        event_emitter = AsyncMock()
+        body = {
+            "stream": True,
+            "messages": [{"role": "user", "content": "test query"}],
+        }
+
+        generator = await self.pipe.pipe(
+            body=body,
+            __user__=None,
+            __request__=None,
+            __event_emitter__=event_emitter,
+        )
+        chunks = []
+        async for chunk in generator:
+            chunks.append(chunk)
+
+        full_output = "".join(chunks)
+
+        # Assert model configuration error is in the output and it immediately returned
+        assert "Configuration Error" in full_output
+        assert "No backend model is specified" in full_output
+        assert "<thinking>" not in full_output  # Halts before executing any step
+
+        # Verify status event was emitted with done: True
+        emitted_types = [call[0][0]["type"] for call in event_emitter.call_args_list]
+        assert "status" in emitted_types
+        status_call = event_emitter.call_args_list[0][0][0]
+        assert (
+            status_call["data"]["description"] == "Configuration Error: No backend model specified."
+        )
+        assert status_call["data"]["done"] is True
+
+    @pytest.mark.asyncio
+    async def test_pipe_validation_only_tavily_configured(self) -> None:
+        """Verify pre-flight validation succeeds when only Tavily is configured."""
+        self.pipe.valves.TAVILY_API_KEY = "mock-key"
+        self.pipe.valves.SEARXNG_URL = ""
+        self.pipe.valves.MODEL = "mock-model"
+
+        # Mock standard loop so it terminates immediately
+        self.pipe._search_query = AsyncMock(return_value=[])
+        self.pipe._get_update_notification = AsyncMock(return_value=None)
+
+        async def mock_synthesize(*args: Any, **kwargs: Any) -> AsyncGenerator[str, None]:
+            yield "Success"
+
+        self.pipe._synthesize_report = mock_synthesize
+
+        event_emitter = AsyncMock()
+        body: dict[str, Any] = {
+            "stream": True,
+            "messages": [{"role": "user", "content": "test query"}],
+        }
+
+        with (
+            patch(
+                "open_webui.utils.chat.generate_chat_completion",
+                new_callable=AsyncMock,
+                return_value='{"gaps": [], "queries": []}',
+            ),
+            patch(
+                "socket.getaddrinfo", return_value=[(None, None, None, None, ("93.184.216.34", 0))]
+            ),
+        ):
+            generator = await self.pipe.pipe(
+                body=body,
+                __user__=None,
+                __request__=None,
+                __event_emitter__=event_emitter,
+            )
+            chunks: list[str] = []
+            async for chunk in generator:
+                chunks.append(chunk)
+
+            full_output = "".join(chunks)
+
+            # Assert that there is NO configuration error
+            assert "Configuration Error" not in full_output
+            assert "Success" in full_output
+
+    @pytest.mark.asyncio
+    async def test_pipe_validation_only_searxng_configured(self) -> None:
+        """Verify pre-flight validation succeeds when only SearXNG is configured."""
+        self.pipe.valves.TAVILY_API_KEY = ""
+        self.pipe.valves.SEARXNG_URL = "https://searxng.local"
+        self.pipe.valves.MODEL = "mock-model"
+
+        # Mock standard loop so it terminates immediately
+        self.pipe._search_query = AsyncMock(return_value=[])
+        self.pipe._get_update_notification = AsyncMock(return_value=None)
+
+        async def mock_synthesize(*args: Any, **kwargs: Any) -> AsyncGenerator[str, None]:
+            yield "Success"
+
+        self.pipe._synthesize_report = mock_synthesize
+
+        event_emitter = AsyncMock()
+        body: dict[str, Any] = {
+            "stream": True,
+            "messages": [{"role": "user", "content": "test query"}],
+        }
+
+        with (
+            patch(
+                "open_webui.utils.chat.generate_chat_completion",
+                new_callable=AsyncMock,
+                return_value='{"gaps": [], "queries": []}',
+            ),
+            patch(
+                "socket.getaddrinfo", return_value=[(None, None, None, None, ("93.184.216.34", 0))]
+            ),
+        ):
+            generator = await self.pipe.pipe(
+                body=body,
+                __user__=None,
+                __request__=None,
+                __event_emitter__=event_emitter,
+            )
+            chunks: list[str] = []
+            async for chunk in generator:
+                chunks.append(chunk)
+
+            full_output = "".join(chunks)
+
+            # Assert that there is NO configuration error
+            assert "Configuration Error" not in full_output
+            assert "Success" in full_output
+
+    @pytest.mark.asyncio
+    async def test_pipe_validation_valves_none_and_empty_values(self) -> None:
+        """Verify pre-flight validation when valves are set to None or empty types."""
+        self.pipe.valves.TAVILY_API_KEY = None
+        self.pipe.valves.SEARXNG_URL = None
+        self.pipe.valves.MODEL = "mock-model"
+
+        event_emitter = AsyncMock()
+        body: dict[str, Any] = {
+            "stream": True,
+            "messages": [{"role": "user", "content": "test query"}],
+        }
+
+        generator = await self.pipe.pipe(
+            body=body,
+            __user__=None,
+            __request__=None,
+            __event_emitter__=event_emitter,
+        )
+        chunks: list[str] = []
+        async for chunk in generator:
+            chunks.append(chunk)
+
+        full_output = "".join(chunks)
+
+        # Assert search engine configuration error is in the output and it immediately returned
+        assert "Configuration Error" in full_output
+        assert "No search engine is configured" in full_output
+
+    @pytest.mark.asyncio
+    async def test_pipe_planning_llm_failure(self) -> None:
+        """Verify planning LLM call failure closes thinking, yields error banner and halts."""
+        self.pipe.valves.MAX_STEPS = 1
+        self.pipe.valves.MAX_PAGES_TO_SCRAPE = 1
+        self.pipe.valves.MODEL = "mock-model"
+        self.pipe.valves.TAVILY_API_KEY = "mock-key"
+
+        # Mock LLM call returning empty/falsy response
+        self.pipe._call_llm = AsyncMock(return_value="")
+
+        event_emitter = AsyncMock()
+        body: dict[str, Any] = {
+            "stream": True,
+            "messages": [{"role": "user", "content": "test query"}],
+        }
+
+        generator = await self.pipe.pipe(
+            body=body,
+            __user__=None,
+            __request__=None,
+            __event_emitter__=event_emitter,
+        )
+        chunks: list[str] = []
+        async for chunk in generator:
+            chunks.append(chunk)
+
+        full_output = "".join(chunks)
+
+        # Assert that thinking block is closed cleanly
+        assert "</thinking>\n\n" in full_output
+        # Assert that the highly visible markdown error banner was yielded
+        assert (
+            "> ⚠️ **Error**: Failed to generate planning strategy using backend model 'mock-model'."
+            in full_output
+        )
+        # Assert that we halted execution immediately (no synthesis is in output)
+        assert "Final Synthesis" not in full_output
+
+        # Verify status event was emitted with done: True
+        status_calls = [
+            call[0][0] for call in event_emitter.call_args_list if call[0][0]["type"] == "status"
+        ]
+        assert len(status_calls) > 0
+        error_status = status_calls[-1]
+        assert (
+            "Critical Error: Failed to generate planning strategy"
+            in error_status["data"]["description"]
+        )
+        assert error_status["data"]["done"] is True
+
+    @pytest.mark.asyncio
+    async def test_pipe_synthesis_llm_failure(self) -> None:
+        """Verify synthesis LLM call failure yields error banner and halts."""
+        self.pipe.valves.MAX_STEPS = 1
+        self.pipe.valves.MAX_PAGES_TO_SCRAPE = 1
+        self.pipe.valves.MODEL = "mock-model"
+        self.pipe.valves.TAVILY_API_KEY = "mock-key"
+
+        # Mock LLM call. First call for planning succeeds, second call for synthesis fails (empty response)
+        call_count = 0
+
+        async def mock_call_llm(*args: Any, **kwargs: Any) -> str:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return '{"gaps": [], "queries": []}'  # early exit -> synthesis
+            return ""  # synthesis failure
+
+        self.pipe._call_llm = mock_call_llm
+
+        event_emitter = AsyncMock()
+        body: dict[str, Any] = {
+            "stream": True,
+            "messages": [{"role": "user", "content": "test query"}],
+        }
+
+        generator = await self.pipe.pipe(
+            body=body,
+            __user__=None,
+            __request__=None,
+            __event_emitter__=event_emitter,
+        )
+        chunks: list[str] = []
+        async for chunk in generator:
+            chunks.append(chunk)
+
+        full_output = "".join(chunks)
+
+        # Assert that the highly visible markdown error banner was yielded
+        assert (
+            "> ⚠️ **Error**: Final synthesis failed due to an empty response from model 'mock-model'."
+            in full_output
+        )
+
+        # Verify status event was emitted with done: True
+        status_calls = [
+            call[0][0] for call in event_emitter.call_args_list if call[0][0]["type"] == "status"
+        ]
+        assert len(status_calls) > 0
+        error_status = status_calls[-1]
+        assert "Critical Error: Final synthesis failed" in error_status["data"]["description"]
+        assert error_status["data"]["done"] is True

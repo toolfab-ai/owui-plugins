@@ -8,9 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+## [Unreleased]
+
+### Added
+- Pre-flight configuration validation to ensure at least one search engine (SearXNG or Tavily) is configured and a backend model is specified in the valves before execution.
+- Prominent inline, user-facing critical markdown warning banners at the very top of responses when configurations or backend models are missing or invalid.
+- Robust unit test coverage for validation rules, including only-Tavily, only-SearXNG, and unexpected falsy valve types.
 - Explicit `requirements` metadata field for automated dependency provisioning in isolated environments (v10+).
 
+### Changed
+- Removed model auto-detection logic completely to strictly enforce manual MODEL configuration in valves and avoid unexpected database model lookups.
+
 ### Fixed
+- Misleading exit state ("All Information Gaps Resolved") when the planning LLM call failed or returned an empty response.
+- Runtime LLM failure handling in both planning and synthesis phases to raise clear inline errors and halt execution immediately, preventing token and API waste.
 - **Open WebUI v11 Compatibility**: Refactored internal imports (`Models`, `generate_chat_completion`) to support both legacy and modern `open_webui` namespaces.
 - **Resilience**: Implemented dynamic sync/async resolution for `Users` model calls to ensure stability across database driver upgrades.
 
