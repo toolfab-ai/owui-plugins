@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 import socket
 import sys
 import time
 import traceback
-from typing import Any, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 from urllib.parse import urlparse
 
+from ._updates import Updates
 from ._valves import Valves
 
 # ---------------------------------------------------------------------------
@@ -22,7 +24,7 @@ logger = logging.getLogger(__name__)
 # ========================================================================
 
 
-class Filter:
+class Filter(Updates):
     """
     Fetch URL Debugger — A Filter plugin that monkey-patches the native
     Open WebUI fetch_url tool to provide deep internal logging.
@@ -74,10 +76,21 @@ class Filter:
         self,
         body: Dict[str, Any],
         __user__: Optional[Dict[str, Any]] = None,
+        __event_emitter__: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         """
         Inlet hook to perform the monkey-patching of fetch_url.
         """
+        if __event_emitter__:
+            update_msg = await self._get_update_notification(__user__)
+            if update_msg:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {"description": update_msg, "done": True},
+                    }
+                )
+
         if not self.valves.ENABLED:
             return body
 
@@ -93,18 +106,24 @@ class Filter:
 
         try:
             # Attempt to import the builtin tools module
-            try:
-                import open_webui.tools.builtin as builtin_tools
-            except ImportError:
-                # Fallback or check if it's under a different path in some versions
+            builtin_tools = None
+            for import_path in [
+                "open_webui.tools.builtin",
+                "open_webui.apps.webui.tools.builtin",
+            ]:
+                try:
+                    builtin_tools = __import__(import_path, fromlist=["fetch_url"])
+                    if hasattr(builtin_tools, "fetch_url"):
+                        logger.info(f"Found fetch_url at {import_path}")
+                        break
+                except ImportError:
+                    continue
+
+            if not builtin_tools or not hasattr(builtin_tools, "fetch_url"):
                 self._log_to_stderr(
-                    "WARNING: Could not import open_webui.tools.builtin. "
+                    "WARNING: Could not find open_webui.tools.builtin.fetch_url. "
                     "This plugin might not be compatible with your Open WebUI version."
                 )
-                return body
-
-            if not hasattr(builtin_tools, "fetch_url"):
-                self._log_to_stderr("WARNING: fetch_url not found in open_webui.tools.builtin.")
                 return body
 
             original_fetch_url = builtin_tools.fetch_url
@@ -121,10 +140,29 @@ class Filter:
 
                     async def wrapped_fetch_url(*args: Any, **kwargs: Any) -> Any:
                         url = args[0] if args else kwargs.get("url", "UNKNOWN")
+                        __event_emitter__ = kwargs.get("__event_emitter__")
+
                         dns_info = self._dns_precheck(url)
                         self._log_to_stderr(
                             f"REQUEST INITIATED (ASYNC)\nURL: {url}\n{dns_info}\nArgs: {args}\nKwargs: {kwargs}"
                         )
+                        if __event_emitter__:
+                            await __event_emitter__(
+                                {
+                                    "type": "status",
+                                    "data": {"description": f"DEBUG: {dns_info}", "done": False},
+                                }
+                            )
+                            await __event_emitter__(
+                                {
+                                    "type": "status",
+                                    "data": {
+                                        "description": "DEBUG: Calling native fetch_url...",
+                                        "done": False,
+                                    },
+                                }
+                            )
+
                         try:
                             start_req = time.perf_counter()
                             result = await original_fetch_url(*args, **kwargs)
@@ -139,6 +177,16 @@ class Filter:
                             self._log_to_stderr(
                                 f"REQUEST FAILED\nCATEGORY: {category}\nURL: {url}\nERROR: {str(e)}\n\nTRACEBACK:\n{stack}"
                             )
+                            if __event_emitter__:
+                                await __event_emitter__(
+                                    {
+                                        "type": "status",
+                                        "data": {
+                                            "description": f"DEBUG: fetch_url failed ({category}): {str(e)}",
+                                            "done": False,
+                                        },
+                                    }
+                                )
                             raise e
 
                     return wrapped_fetch_url
@@ -146,10 +194,60 @@ class Filter:
 
                     def wrapped_fetch_url(*args: Any, **kwargs: Any) -> Any:
                         url = args[0] if args else kwargs.get("url", "UNKNOWN")
+                        __event_emitter__ = kwargs.get("__event_emitter__")
+
                         dns_info = self._dns_precheck(url)
                         self._log_to_stderr(
                             f"REQUEST INITIATED (SYNC)\nURL: {url}\n{dns_info}\nArgs: {args}\nKwargs: {kwargs}"
                         )
+                        if __event_emitter__:
+                            # We can't await here in sync, but we might be able to try to call it if it's not a coroutine
+                            # However, Open WebUI event_emitters are usually async.
+                            # For sync tools, we might be limited, but let's try a safe approach.
+                            if inspect.iscoroutinefunction(__event_emitter__):
+                                try:
+                                    # This is risky in sync code but common in some OWUI environments
+                                    loop = asyncio.get_event_loop()
+                                    if loop.is_running():
+                                        loop.create_task(
+                                            __event_emitter__(
+                                                {
+                                                    "type": "status",
+                                                    "data": {
+                                                        "description": f"DEBUG: {dns_info}",
+                                                        "done": False,
+                                                    },
+                                                }
+                                            )
+                                        )
+                                    else:
+                                        loop.run_until_complete(
+                                            __event_emitter__(
+                                                {
+                                                    "type": "status",
+                                                    "data": {
+                                                        "description": f"DEBUG: {dns_info}",
+                                                        "done": False,
+                                                    },
+                                                }
+                                            )
+                                        )
+                                except Exception:
+                                    pass
+                            else:
+                                try:
+                                    __event_emitter__(
+                                        {
+                                            "type": "status",
+                                            "data": {
+                                                "description": f"DEBUG: {dns_info}",
+                                                "done": False,
+                                            },
+                                        }
+                                    )
+                                except Exception:
+                                    pass
+
                         try:
                             start_req = time.perf_counter()
                             result = original_fetch_url(*args, **kwargs)

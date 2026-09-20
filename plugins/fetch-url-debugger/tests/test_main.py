@@ -61,6 +61,12 @@ def filter_instance():
     return Filter()
 
 
+@pytest.fixture
+def mock_event_emitter():
+    """Provides a mock event emitter."""
+    return mock.AsyncMock()
+
+
 @pytest.mark.unit
 class TestFetchUrlDebugger:
     @pytest.mark.asyncio
@@ -201,6 +207,67 @@ class TestFetchUrlDebugger:
         assert "REQUEST FAILED" in captured.err
         assert f"CATEGORY: {expected_category}" in captured.err
         assert f"ERROR: {str(exception)}" in captured.err
+
+    @pytest.mark.asyncio
+    async def test_emits_status_events(
+        self,
+        filter_instance: Filter,
+        mock_builtin_tools: mock.MagicMock,
+        mock_event_emitter: mock.AsyncMock,
+    ):
+        """Verify that the wrapped function emits UI status events."""
+        original_fetch_url = mock.AsyncMock(return_value="ok")
+        original_fetch_url.__is_fetch_url_debugger__ = False
+        mock_builtin_tools.fetch_url = original_fetch_url
+
+        await filter_instance.inlet({})
+
+        with mock.patch("socket.getaddrinfo") as mock_getaddrinfo:
+            mock_getaddrinfo.return_value = [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))
+            ]
+
+            # Call patched function with event emitter
+            await mock_builtin_tools.fetch_url(
+                "http://example.com", __event_emitter__=mock_event_emitter
+            )
+
+            # Check that event emitter was called with expected statuses
+            calls = [call.args[0] for call in mock_event_emitter.call_args_list]
+
+            # Should have at least the DNS check and the native call status
+            assert any(
+                "DEBUG: DNS Check: Resolved example.com" in c["data"]["description"] for c in calls
+            )
+            assert any(
+                "DEBUG: Calling native fetch_url..." in c["data"]["description"] for c in calls
+            )
+
+    @pytest.mark.asyncio
+    async def test_emits_error_status_events(
+        self,
+        filter_instance: Filter,
+        mock_builtin_tools: mock.MagicMock,
+        mock_event_emitter: mock.AsyncMock,
+    ):
+        """Verify that the wrapped function emits UI status events on failure."""
+        exception = TimeoutError("Connection timed out")
+        original_fetch_url = mock.AsyncMock(side_effect=exception)
+        original_fetch_url.__is_fetch_url_debugger__ = False
+        mock_builtin_tools.fetch_url = original_fetch_url
+
+        await filter_instance.inlet({})
+
+        with pytest.raises(TimeoutError):
+            await mock_builtin_tools.fetch_url(
+                "http://example.com", __event_emitter__=mock_event_emitter
+            )
+
+        calls = [call.args[0] for call in mock_event_emitter.call_args_list]
+        assert any(
+            "DEBUG: fetch_url failed (TIMEOUT): Connection timed out" in c["data"]["description"]
+            for c in calls
+        )
 
     @pytest.mark.asyncio
     async def test_handles_sync_function(
