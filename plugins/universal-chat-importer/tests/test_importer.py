@@ -233,14 +233,13 @@ class TestImportChatgptExport:
         # _load_conversations returns [] for non-zip if it fails to parse as JSON either
         # Since it's not a zip, it tries to open it as a text file and json.load it.
         # If it's not valid JSON, it will raise json.JSONDecodeError.
-        # The import_chatgpt_export catches exceptions.
 
         with patch.object(tools, "_get_file_path", return_value=str(corrupted_file)):
             with patch("os.path.isfile", return_value=True):
                 with patch.object(mod, "_get_db_path", return_value="fake.db"):
                     result = await tools.import_chatgpt_export("file1", {"id": "user1"})
 
-        assert "Import failed" in result
+        assert "Error: Could not find any valid conversations" in result
 
     @pytest.mark.asyncio
     async def test_missing_conversations_json(self, tmp_path):
@@ -255,7 +254,7 @@ class TestImportChatgptExport:
                 with patch.object(mod, "_get_db_path", return_value="fake.db"):
                     result = await tools.import_chatgpt_export("file1", {"id": "user1"})
 
-        assert "Error: Could not find conversations.json" in result
+        assert "Error: Could not find any valid conversations" in result
 
     @pytest.mark.asyncio
     async def test_large_export(self, tmp_path):

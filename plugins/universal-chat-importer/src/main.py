@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -89,7 +90,7 @@ class Tools(UpdateMixin):
 
         try:
             # 1. Retrieve file path from DB
-            file_path = self._get_file_path(db_path, file_id)
+            file_path = await asyncio.to_thread(self._get_file_path, db_path, file_id)
             if not file_path:
                 return f"Error: File with ID {file_id} not found in database."
 
@@ -97,22 +98,35 @@ class Tools(UpdateMixin):
                 return f"Error: File not found on disk at {file_path}"
 
             # 2. Extract and Load conversations.json
-            conversations = self._load_conversations(file_path)
+            conversations = await asyncio.to_thread(self._load_conversations, file_path)
             if not conversations:
-                return "Error: Could not find conversations.json in the provided file."
+                return "Error: Could not find any valid conversations in the provided file."
 
+            total = len(conversations)
             imported_count = 0
             error_count = 0
 
-            for conv in conversations:
+            for i, conv in enumerate(conversations):
                 try:
                     chat_data = self._map_chatgpt_to_owui(conv)
                     if chat_data:
-                        self._insert_chat(db_path, user_id, chat_data)
+                        await asyncio.to_thread(self._insert_chat, db_path, user_id, chat_data)
                         imported_count += 1
                 except Exception:
                     logger.exception(f"Failed to import conversation: {conv.get('title')}")
                     error_count += 1
+
+                # Granular progress updates every 50 conversations
+                if __event_emitter__ and (i + 1) % 50 == 0:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": f"Importing conversations... ({i + 1}/{total})",
+                                "done": False,
+                            },
+                        }
+                    )
 
             summary = f"Successfully imported {imported_count} chats."
             if error_count > 0:
@@ -151,22 +165,33 @@ class Tools(UpdateMixin):
             conn.close()
 
     def _load_conversations(self, file_path: str) -> List[Dict[str, Any]]:
-        """Load conversations.json from a ZIP or raw JSON file."""
+        """Load conversations from a ZIP or raw JSON file."""
+        all_conversations: List[Dict[str, Any]] = []
+
         if zipfile.is_zipfile(file_path):
             with zipfile.ZipFile(file_path, "r") as z:
-                # ChatGPT export ZIP usually contains conversations.json
-                if "conversations.json" in z.namelist():
-                    with z.open("conversations.json") as f:
-                        return json.load(f)
-                # Try to find any JSON file that looks like conversations
+                # Find all JSON files that look like conversations
                 for name in z.namelist():
-                    if name.endswith(".json") and "conversations" in name.lower():
-                        with z.open(name) as f:
-                            return json.load(f)
+                    if name.endswith(".json") and (
+                        "conversations" in name.lower() or name == "conversations.json"
+                    ):
+                        try:
+                            with z.open(name) as f:
+                                data = json.load(f)
+                                if isinstance(data, list):
+                                    all_conversations.extend(data)
+                        except (json.JSONDecodeError, zipfile.BadZipFile):
+                            logger.exception(f"Failed to load {name} from ZIP")
         else:
-            with open(file_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        return []
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        all_conversations.extend(data)
+            except json.JSONDecodeError:
+                logger.exception("Failed to load raw JSON file")
+
+        return all_conversations
 
     def _map_chatgpt_to_owui(self, conv: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Map a ChatGPT conversation object to the Open WebUI chat format."""
