@@ -65,19 +65,24 @@ class Tools(UpdateMixin):
 
     async def import_chatgpt_export(
         self,
-        file_id: str,
+        file_ids: List[str],
         __user__: Dict[str, Any],
         __event_emitter__: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> str:
         """
-        PERFORM IMPORT and PARSE DATA from a ChatGPT export file.
-        Use this tool to EXECUTE the migration of chat history from an uploaded ZIP or JSON export.
+        USE THIS TOOL to PERFORM MIGRATION of ChatGPT history.
+        If one or more files are uploaded, EXTRACT their IDs and CALL THIS TOOL IMMEDIATELY.
+        DO NOT explain the process, JUST EXECUTE.
 
-        :param file_id: The UUID of the uploaded file in Open WebUI.
+        :param file_ids: A list of UUIDs for the uploaded files in Open WebUI (e.g. from context).
         :return: A summary message of the import process.
         """
-        logger.info(f"LLM triggered import_chatgpt_export for file_id: {file_id}")
+        logger.info(f"LLM triggered import_chatgpt_export for file_ids: {file_ids}")
         user_id = __user__.get("id", "")
+
+        if not file_ids:
+            return "Error: No file IDs provided for import."
+
         if __event_emitter__:
             await __event_emitter__(
                 {
@@ -88,122 +93,73 @@ class Tools(UpdateMixin):
 
         db_path = _get_db_path()
         if not os.path.isfile(db_path):
-            return f"Error: Database not found at {db_path}"
-
-        try:
-            # 1. Retrieve file path from DB
-            file_path = await asyncio.to_thread(self._get_file_path, db_path, file_id)
-            if not file_path:
-                return f"Error: File with ID {file_id} not found in database."
-
-            if not os.path.isfile(file_path):
-                return f"Error: File not found on disk at {file_path}"
-
-            summary = await self._execute_import(file_path, user_id, __event_emitter__)
-
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {"description": summary, "done": True},
-                    }
-                )
-
-            return summary
-
-        except Exception as e:
-            logger.exception("Import process failed")
-            error_msg = f"Import failed: {str(e)}"
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {"description": error_msg, "done": True},
-                    }
-                )
-            return error_msg
-
-    async def import_chatgpt_from_path(
-        self,
-        path: str,
-        __user__: Dict[str, Any],
-        __event_emitter__: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
-    ) -> str:
-        """
-        PERFORM IMPORT and PARSE DATA from a local filesystem path.
-        Use this tool to EXECUTE the migration of chat history from a file already present on the server.
-        Crucial for large files that fail standard uploads.
-
-        :param path: The absolute filesystem path to the ChatGPT export (ZIP or JSON).
-        :return: A summary message of the import process.
-        """
-        logger.info(f"LLM triggered import_chatgpt_from_path for path: {path}")
-        user_id = __user__.get("id", "")
-
-        # Security check: verify path is within allowed directories
-        allowed = False
-        abs_path = os.path.abspath(path)
-        for allowed_dir in self.valves.ALLOWED_IMPORT_DIRECTORIES:
-            abs_allowed = os.path.abspath(allowed_dir)
-            if abs_path.startswith(abs_allowed):
-                allowed = True
-                break
-
-        if not allowed:
-            error_msg = f"Access denied: Path {path} is not in allowed import directories."
+            error_msg = f"Error: Database not found at {db_path}"
             logger.error(error_msg)
             return error_msg
 
-        if not os.path.isfile(abs_path):
-            return f"Error: File not found at {abs_path}"
+        results: List[str] = []
+        total_imported = 0
+        total_errors = 0
+
+        for file_id in file_ids:
+            logger.info(f"Starting import for file_id: {file_id}")
+            try:
+                # 1. Retrieve file path from DB
+                file_path = await asyncio.to_thread(self._get_file_path, db_path, file_id)
+                if not file_path:
+                    msg = f"File {file_id} not found in database."
+                    logger.warning(msg)
+                    results.append(f"Error: {msg}")
+                    continue
+
+                if not os.path.isfile(file_path):
+                    msg = f"File {file_id} not found on disk at {file_path}"
+                    logger.warning(msg)
+                    results.append(f"Error: {msg}")
+                    continue
+
+                imported, errors, summary = await self._execute_import(
+                    file_path, user_id, __event_emitter__
+                )
+                total_imported += imported
+                total_errors += errors
+                results.append(f"File {file_id}: {summary}")
+
+            except Exception as e:
+                logger.exception(f"Import process failed for file {file_id}")
+                results.append(f"File {file_id} failed: {str(e)}")
+                total_errors += 1
+
+        final_summary = (
+            f"Import complete. Successfully imported {total_imported} chats "
+            f"across {len(file_ids)} files. Errors: {total_errors}."
+        )
 
         if __event_emitter__:
             await __event_emitter__(
                 {
                     "type": "status",
-                    "data": {"description": f"Starting import from {abs_path}...", "done": False},
+                    "data": {"description": final_summary, "done": True},
                 }
             )
 
-        try:
-            summary = await self._execute_import(abs_path, user_id, __event_emitter__)
-
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {"description": summary, "done": True},
-                    }
-                )
-
-            return summary
-        except Exception as e:
-            logger.exception("Direct path import failed")
-            error_msg = f"Direct path import failed: {str(e)}"
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {"description": error_msg, "done": True},
-                    }
-                )
-            return error_msg
+        return "\n".join(results) + f"\n\nOverall: {final_summary}"
 
     async def _execute_import(
         self,
         file_path: str,
         user_id: str,
         __event_emitter__: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
-    ) -> str:
+    ) -> tuple[int, int, str]:
         """Factor out core import logic (loading, mapping, inserting)."""
         db_path = _get_db_path()
         if not os.path.isfile(db_path):
-            return f"Error: Database not found at {db_path}"
+            return 0, 0, f"Error: Database not found at {db_path}"
 
         # Load conversations
         conversations = await asyncio.to_thread(self._load_conversations, file_path)
         if not conversations:
-            return "Error: Could not find any valid conversations in the provided file."
+            return 0, 0, "Error: Could not find any valid conversations in the provided file."
 
         total = len(conversations)
         imported_count = 0
@@ -235,7 +191,7 @@ class Tools(UpdateMixin):
         if error_count > 0:
             summary += f" Encountered errors in {error_count} chats."
 
-        return summary
+        return imported_count, error_count, summary
 
     def _get_file_path(self, db_path: str, file_id: str) -> Optional[str]:
         """Get the absolute file path from the file table."""
@@ -250,27 +206,33 @@ class Tools(UpdateMixin):
     def _load_conversations(self, file_path: str) -> List[Dict[str, Any]]:
         """Load conversations from a ZIP or raw JSON file."""
         all_conversations: List[Dict[str, Any]] = []
+        logger.info(f"Loading conversations from {file_path}")
 
         if zipfile.is_zipfile(file_path):
+            logger.info("Identified as ZIP file.")
             with zipfile.ZipFile(file_path, "r") as z:
                 # Find all JSON files that look like conversations
                 for name in z.namelist():
                     if name.endswith(".json") and (
                         "conversations" in name.lower() or name == "conversations.json"
                     ):
+                        logger.info(f"Found conversation JSON in ZIP: {name}")
                         try:
                             with z.open(name) as f:
                                 data = json.load(f)
                                 if isinstance(data, list):
                                     all_conversations.extend(data)
+                                    logger.info(f"Loaded {len(data)} conversations from {name}")
                         except (json.JSONDecodeError, zipfile.BadZipFile):
                             logger.exception(f"Failed to load {name} from ZIP")
         else:
+            logger.info("Identified as raw JSON file.")
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     if isinstance(data, list):
                         all_conversations.extend(data)
+                        logger.info(f"Loaded {len(data)} conversations from raw JSON.")
             except json.JSONDecodeError:
                 logger.exception("Failed to load raw JSON file")
 

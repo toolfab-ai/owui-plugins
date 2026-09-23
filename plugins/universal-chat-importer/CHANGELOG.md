@@ -3,20 +3,16 @@
 ## [Unreleased]
 
 ### Added
-- Added `import_chatgpt_from_path` tool for importing exports directly from the server filesystem, bypassing upload limits.
-- Added `ALLOWED_IMPORT_DIRECTORIES` Valve for security, restricting direct path imports to admin-defined folders.
-- Initial implementation of Universal Chat Importer Tool.
-- Support for ChatGPT ZIP and `conversations.json` imports.
-- Automatic mapping of ChatGPT hierarchy (DAG) to Open WebUI chat tree.
-- Database integration with Open WebUI's `chat` table.
-- Summary reporting of imported/failed chats.
-- Progress reporting via status events during the import process.
+- Support for importing multiple uploaded files in a single tool call.
+- Enhanced logging for ZIP and JSON processing, visible in server logs.
+- Added explicit trigger instructions to the tool docstring to improve LLM invocation reliability.
 
 ### Changed
-- Optimized tool triggers by updating `import_chatgpt_export` docstring with more explicit action keywords (PARSE, EXECUTE).
-- Refactored core import logic into a private `_execute_import` method for reusability.
-- Added logging for LLM tool invocation visibility in server logs.
-- Refactored `import_chatgpt_export` to be non-blocking using `asyncio.to_thread`.
+- Refactored `import_chatgpt_export` to accept a list of file IDs (`file_ids: List[str]`).
+- Improved progress reporting with cumulative summaries for multiple files.
+
+### Removed
+- Removed direct path support (`import_chatgpt_from_path`) and the associated `ALLOWED_IMPORT_DIRECTORIES` Valve for improved security and simplified workflow.
 
 ### Fixed
-- Fixed "endless loading" issue during large chat imports by offloading heavy JSON parsing and DB operations.
+- Fixed "nothing happened" issue reported by users by making the tool docstring more aggressive and explicit about execution.

@@ -77,7 +77,9 @@ class TestUniversalChatImporter:
         mock_zip_obj.open.side_effect = open_side_effect
 
         # Run import
-        result = await self.tools.import_chatgpt_export("file-uuid", self.user, self.event_emitter)
+        result = await self.tools.import_chatgpt_export(
+            ["file-uuid"], self.user, self.event_emitter
+        )
 
         # Verify result
         assert "Successfully imported 200 chats" in result
@@ -147,10 +149,12 @@ class TestUniversalChatImporter:
         mock_zip_obj.namelist.return_value = ["conversations.json"]
         mock_zip_obj.open.return_value = io.BytesIO(json.dumps(chats).encode("utf-8"))
 
-        result = await self.tools.import_chatgpt_export("file-uuid", self.user, self.event_emitter)
+        result = await self.tools.import_chatgpt_export(
+            ["file-uuid"], self.user, self.event_emitter
+        )
 
-        assert "Successfully imported 2 chats." in result
-        assert "Encountered errors in 1 chats." in result
+        assert "Successfully imported 2 chat" in result
+        assert "Encountered errors in 1 chat" in result
 
         # Total chats processed should be 3, but only 2 imported
         assert self.event_emitter.call_count == 2  # Start and End (no 50-chat increments)
