@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import List
+
 from pydantic import BaseModel, Field
 
 
@@ -17,4 +19,8 @@ class Valves(BaseModel):
     DEFAULT_MODEL: str = Field(
         default="gpt-4o",
         description="The model name to assign to imported chats if not specified.",
+    )
+    ALLOWED_IMPORT_DIRECTORIES: List[str] = Field(
+        default=["/app/backend/data"],
+        description="List of absolute filesystem paths allowed for direct file imports. Used by import_chatgpt_from_path.",
     )

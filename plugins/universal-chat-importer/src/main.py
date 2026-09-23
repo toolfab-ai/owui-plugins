@@ -70,11 +70,13 @@ class Tools(UpdateMixin):
         __event_emitter__: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> str:
         """
-        Import a ChatGPT export (ZIP or conversations.json) into Open WebUI.
+        PERFORM IMPORT and PARSE DATA from a ChatGPT export file.
+        Use this tool to EXECUTE the migration of chat history from an uploaded ZIP or JSON export.
 
         :param file_id: The UUID of the uploaded file in Open WebUI.
         :return: A summary message of the import process.
         """
+        logger.info(f"LLM triggered import_chatgpt_export for file_id: {file_id}")
         user_id = __user__.get("id", "")
         if __event_emitter__:
             await __event_emitter__(
@@ -97,40 +99,7 @@ class Tools(UpdateMixin):
             if not os.path.isfile(file_path):
                 return f"Error: File not found on disk at {file_path}"
 
-            # 2. Extract and Load conversations.json
-            conversations = await asyncio.to_thread(self._load_conversations, file_path)
-            if not conversations:
-                return "Error: Could not find any valid conversations in the provided file."
-
-            total = len(conversations)
-            imported_count = 0
-            error_count = 0
-
-            for i, conv in enumerate(conversations):
-                try:
-                    chat_data = self._map_chatgpt_to_owui(conv)
-                    if chat_data:
-                        await asyncio.to_thread(self._insert_chat, db_path, user_id, chat_data)
-                        imported_count += 1
-                except Exception:
-                    logger.exception(f"Failed to import conversation: {conv.get('title')}")
-                    error_count += 1
-
-                # Granular progress updates every 50 conversations
-                if __event_emitter__ and (i + 1) % 50 == 0:
-                    await __event_emitter__(
-                        {
-                            "type": "status",
-                            "data": {
-                                "description": f"Importing conversations... ({i + 1}/{total})",
-                                "done": False,
-                            },
-                        }
-                    )
-
-            summary = f"Successfully imported {imported_count} chats."
-            if error_count > 0:
-                summary += f" Encountered errors in {error_count} chats."
+            summary = await self._execute_import(file_path, user_id, __event_emitter__)
 
             if __event_emitter__:
                 await __event_emitter__(
@@ -153,6 +122,120 @@ class Tools(UpdateMixin):
                     }
                 )
             return error_msg
+
+    async def import_chatgpt_from_path(
+        self,
+        path: str,
+        __user__: Dict[str, Any],
+        __event_emitter__: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+    ) -> str:
+        """
+        PERFORM IMPORT and PARSE DATA from a local filesystem path.
+        Use this tool to EXECUTE the migration of chat history from a file already present on the server.
+        Crucial for large files that fail standard uploads.
+
+        :param path: The absolute filesystem path to the ChatGPT export (ZIP or JSON).
+        :return: A summary message of the import process.
+        """
+        logger.info(f"LLM triggered import_chatgpt_from_path for path: {path}")
+        user_id = __user__.get("id", "")
+
+        # Security check: verify path is within allowed directories
+        allowed = False
+        abs_path = os.path.abspath(path)
+        for allowed_dir in self.valves.ALLOWED_IMPORT_DIRECTORIES:
+            abs_allowed = os.path.abspath(allowed_dir)
+            if abs_path.startswith(abs_allowed):
+                allowed = True
+                break
+
+        if not allowed:
+            error_msg = f"Access denied: Path {path} is not in allowed import directories."
+            logger.error(error_msg)
+            return error_msg
+
+        if not os.path.isfile(abs_path):
+            return f"Error: File not found at {abs_path}"
+
+        if __event_emitter__:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {"description": f"Starting import from {abs_path}...", "done": False},
+                }
+            )
+
+        try:
+            summary = await self._execute_import(abs_path, user_id, __event_emitter__)
+
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {"description": summary, "done": True},
+                    }
+                )
+
+            return summary
+        except Exception as e:
+            logger.exception("Direct path import failed")
+            error_msg = f"Direct path import failed: {str(e)}"
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {"description": error_msg, "done": True},
+                    }
+                )
+            return error_msg
+
+    async def _execute_import(
+        self,
+        file_path: str,
+        user_id: str,
+        __event_emitter__: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+    ) -> str:
+        """Factor out core import logic (loading, mapping, inserting)."""
+        db_path = _get_db_path()
+        if not os.path.isfile(db_path):
+            return f"Error: Database not found at {db_path}"
+
+        # Load conversations
+        conversations = await asyncio.to_thread(self._load_conversations, file_path)
+        if not conversations:
+            return "Error: Could not find any valid conversations in the provided file."
+
+        total = len(conversations)
+        imported_count = 0
+        error_count = 0
+
+        for i, conv in enumerate(conversations):
+            try:
+                chat_data = self._map_chatgpt_to_owui(conv)
+                if chat_data:
+                    await asyncio.to_thread(self._insert_chat, db_path, user_id, chat_data)
+                    imported_count += 1
+            except Exception:
+                logger.exception(f"Failed to import conversation: {conv.get('title')}")
+                error_count += 1
+
+            # Granular progress updates every 50 conversations
+            if __event_emitter__ and (i + 1) % 50 == 0:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"Importing conversations... ({i + 1}/{total})",
+                            "done": False,
+                        },
+                    }
+                )
+
+        summary = f"Successfully imported {imported_count} chats."
+        if error_count > 0:
+            summary += f" Encountered errors in {error_count} chats."
+
+        return summary
 
     def _get_file_path(self, db_path: str, file_id: str) -> Optional[str]:
         """Get the absolute file path from the file table."""
